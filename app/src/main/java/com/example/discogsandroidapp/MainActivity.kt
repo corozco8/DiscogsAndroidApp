@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: ReleaseViewModel = viewModel()
             // Make sure your real token is here!
-            val token = "DKKLTsjxfrIOKuConcaqMLylNNaDIcxpypyQWDpG"
+            val token = "" // insert your key here to test
 
             // Fetch the user profile as soon as the app opens!
             LaunchedEffect(Unit) {
