@@ -2,6 +2,8 @@
 
 A lightweight, streamlined Android application built specifically for high-volume Discogs marketplace sellers. 
 
+https://github.com/user-attachments/assets/c7271669-9a67-4523-bc36-de1990e27562
+
 ## Design Philosophy & Purpose
 Official Discogs app updates (v3.0+) introduced multi-step UI flows that require excessive taps, swipes, and screen transitions to perform basic tasks. For active vinyl sellers, every extra tap adds up, slowing down listing rates, causing user frustration, and ultimately costing both sellers and Discogs money in potential transaction volume.
 
