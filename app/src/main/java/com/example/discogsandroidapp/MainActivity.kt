@@ -63,13 +63,12 @@ import androidx.compose.material.icons.filled.Sell
 import android.content.Intent
 import android.net.Uri
 
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             val viewModel: ReleaseViewModel = viewModel()
-            // Make sure your real token is here!
+            // Your API Token
             val token = "DKKLTsjxfrIOKuConcaqMLylNNaDIcxpypyQWDpG"
 
             // Fetch the user profile as soon as the app opens!
@@ -81,12 +80,12 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val uiState by viewModel.uiState.collectAsState()
                     val profileUiState by viewModel.profileUiState.collectAsState()
+                    val suggestedPrice by viewModel.conditionPriceSuggestion.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
-                    // NEW: Local state to track if we should show the marketplace listings
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
 
-                    // NEW: "Smart Back" logic to prevent going all the way home
+                    // "Smart Back" logic to prevent going all the way home
                     val performSmartBack = {
                         when (uiState) {
                             is ReleaseUiState.ReleaseSuccess -> {
@@ -107,8 +106,8 @@ class MainActivity : ComponentActivity() {
                     if (marketplaceReleaseId != null) {
                         MarketplaceListingsScreen(
                             releaseId = marketplaceReleaseId!!,
-                            viewModel = viewModel, // <-- Passes the ViewModel in
-                            token = token,         // <-- Passes your Discogs token in
+                            viewModel = viewModel,
+                            token = token,
                             onBackClick = { marketplaceReleaseId = null }
                         )
                     } else {
@@ -130,7 +129,6 @@ class MainActivity : ComponentActivity() {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (uiState !is ReleaseUiState.Idle && uiState !is ReleaseUiState.Loading) {
-                                    // Use our new Smart Back function here!
                                     IconButton(onClick = { performSmartBack() }) {
                                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                                     }
@@ -190,6 +188,7 @@ class MainActivity : ComponentActivity() {
                                 contentAlignment = Alignment.Center
                             ) {
                                 when (val state = uiState) {
+                                    // THIS WAS THE MISSING BLOCK!
                                     is ReleaseUiState.Idle -> {
                                         when (val pState = profileUiState) {
                                             is ProfileUiState.Loading -> CircularProgressIndicator()
@@ -249,21 +248,17 @@ class MainActivity : ComponentActivity() {
                                                 SearchResultRow(result = result) {
                                                     when (result.type) {
                                                         "release" -> {
-                                                            // Load standard release natively
                                                             viewModel.fetchRelease(releaseId = result.id.toLong(), token = token)
                                                         }
                                                         "master" -> {
-                                                            // Open Master Release
                                                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.discogs.com/master/${result.id}"))
                                                             localContext.startActivity(intent)
                                                         }
                                                         "artist" -> {
-                                                            // Open Artist Profile
                                                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.discogs.com/artist/${result.id}"))
                                                             localContext.startActivity(intent)
                                                         }
                                                         "label" -> {
-                                                            // Open Label Page
                                                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.discogs.com/label/${result.id}"))
                                                             localContext.startActivity(intent)
                                                         }
@@ -277,10 +272,11 @@ class MainActivity : ComponentActivity() {
                                         ReleaseDetails(
                                             release = state.release,
                                             priceSummary = state.priceSummary,
-                                            onBackClick = { performSmartBack() }, // Uses the Smart Back!
+                                            priceSuggestion = suggestedPrice,
+                                            onBackClick = { performSmartBack() },
                                             onSellConfirm = { price, condition, sleeve, comments ->
                                                 viewModel.createListing(
-                                                    releaseId = state.release.id?.toInt() ?: 0,  // or the correct releaseId
+                                                    releaseId = state.release.id?.toInt() ?: 0,
                                                     price = price,
                                                     condition = condition,
                                                     sleeveCondition = sleeve,
@@ -292,12 +288,20 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             },
                                             onViewListingsClick = { releaseId ->
-                                                // NEW: Just updates the local state to trigger the overlay!
                                                 marketplaceReleaseId = releaseId
+                                            },
+                                            onConditionsChanged = { condition, sleeveCondition ->
+                                                state.release.id?.let { releaseId ->
+                                                    viewModel.fetchPriceSuggestionForCondition(
+                                                        releaseId = releaseId,
+                                                        condition = condition,
+                                                        token = token,
+                                                        sleeveCondition = sleeveCondition
+                                                    )
+                                                }
                                             }
                                         )
                                     }
-
 
                                     is ReleaseUiState.Error -> {
                                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -393,14 +397,14 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                    } // END OF IF/ELSE
+                    }
                 }
             }
         }
     }
 }
 
-// ... All your other composables (ProfileDashboard, SearchResultRow, etc.) remain identical below here ...
+// Below are the dashboard sub-components to keep the file fully intact
 @Composable
 fun ProfileDashboard(
     profile: DiscogsProfile,
@@ -519,7 +523,6 @@ fun ProfileDashboard(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             MenuBrick(title = "My Store", icon = Icons.Default.Store, onClick = onStoreClick)
             MenuBrick(title = "My Orders", icon = Icons.Default.Receipt, onClick = onOrdersClick)
-            MenuBrick(title = "My Inventory", icon = Icons.Default.Inventory, onClick = onInventoryClick)
             MenuBrick(title = "My Offers", icon = Icons.Default.LocalOffer, onClick = onOffersClick)
         }
     }
@@ -581,7 +584,6 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
             Spacer(modifier = Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                // 1. Artist - Title
                 Text(
                     text = result.title,
                     fontWeight = FontWeight.Bold,
@@ -590,7 +592,6 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis
                 )
 
-                // 2. Format Info (e.g. "Vinyl, LP, Album")
                 if (!result.format.isNullOrEmpty()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
@@ -604,9 +605,7 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // 3. Type Badge, Country, Year, and Catalog Number
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Type Badge
                     Surface(
                         shape = RoundedCornerShape(4.dp),
                         color = MaterialTheme.colorScheme.primaryContainer
@@ -620,7 +619,6 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
                         )
                     }
 
-                    // Country
                     if (!result.country.isNullOrBlank()) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
@@ -631,7 +629,6 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
                         )
                     }
 
-                    // Year
                     if (result.year.isNotEmpty()) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
@@ -641,10 +638,8 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
                         )
                     }
 
-                    // NEW: Catalog Number
                     if (!result.catno.isNullOrBlank()) {
                         Spacer(modifier = Modifier.width(8.dp))
-                        // Checks if there's a country or year to determine if it needs a bullet point
                         val prefix = if (result.country.isNullOrBlank() && result.year.isEmpty()) "Cat#: " else "•  "
                         Text(
                             text = "$prefix${result.catno}",
@@ -872,14 +867,13 @@ fun EditListingDialog(
     val conditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)")
     val sleeveConditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Generic", "Not Graded", "No Cover")
 
-    var conditionExpanded by remember { mutableStateOf(false) }
-    var sleeveExpanded by remember { mutableStateOf(false) }
-
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Edit Listing") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+
+                // 1. Price Field
                 OutlinedTextField(
                     value = price,
                     onValueChange = { price = it },
@@ -888,62 +882,67 @@ fun EditListingDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                ExposedDropdownMenuBox(
-                    expanded = conditionExpanded,
-                    onExpandedChange = { conditionExpanded = !conditionExpanded }
-                ) {
-                    OutlinedTextField(
-                        value = condition,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("Media Condition") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = conditionExpanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                // 2. Media Condition Scrollable Row
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Media Condition",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
                     )
-                    ExposedDropdownMenu(
-                        expanded = conditionExpanded,
-                        onDismissRequest = { conditionExpanded = false }
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        conditions.forEach { selection ->
-                            DropdownMenuItem(
-                                text = { Text(selection) },
-                                onClick = {
-                                    condition = selection
-                                    conditionExpanded = false
-                                }
-                            )
+                        items(conditions) { fullGrade ->
+                            val isSelected = condition == fullGrade
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.clickable { condition = fullGrade }
+                            ) {
+                                Text(
+                                    text = getShortGrade(fullGrade),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
 
-                ExposedDropdownMenuBox(
-                    expanded = sleeveExpanded,
-                    onExpandedChange = { sleeveExpanded = !sleeveExpanded }
-                ) {
-                    OutlinedTextField(
-                        value = sleeveCondition,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("Sleeve Condition") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = sleeveExpanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                // 3. Sleeve Condition Scrollable Row
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Sleeve Condition",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
                     )
-                    ExposedDropdownMenu(
-                        expanded = sleeveExpanded,
-                        onDismissRequest = { sleeveExpanded = false }
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        sleeveConditions.forEach { selection ->
-                            DropdownMenuItem(
-                                text = { Text(selection) },
-                                onClick = {
-                                    sleeveCondition = selection
-                                    sleeveExpanded = false
-                                }
-                            )
+                        items(sleeveConditions) { fullGrade ->
+                            val isSelected = sleeveCondition == fullGrade
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.clickable { sleeveCondition = fullGrade }
+                            ) {
+                                Text(
+                                    text = getShortGrade(fullGrade),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
 
+                // 4. Comments Field
                 OutlinedTextField(
                     value = comments,
                     onValueChange = { comments = it },

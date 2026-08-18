@@ -12,18 +12,52 @@ import retrofit2.http.Body
 import retrofit2.Response
 import retrofit2.Call
 
-// If you are using a Kotlin Data Class for the body:
+// ----------------------------
+// Request DTOs (keep if not defined elsewhere)
+// ----------------------------
 @Serializable
 data class CreateListingRequest(
-    val release_id: Int,
+    @SerialName("release_id") val release_id: Int,
     val condition: String,
-    val sleeve_condition: String,
+    @SerialName("sleeve_condition") val sleeve_condition: String,
     val price: Double,
     val comments: String,
-    // NEW: Force the API to publish the listing immediately
     val status: String = "For Sale"
 )
 
+// If EditListingRequest already exists elsewhere, remove this.
+@Serializable
+data class EditListingRequest(
+    val price: Double,
+    val condition: String,
+    @SerialName("sleeve_condition") val sleeve_condition: String,
+    val status: String = "For Sale",
+    val comments: String? = null
+)
+
+// ----------------------------
+// NEW: Marketplace Listing Response (likely not defined yet)
+// ----------------------------
+@Serializable
+data class MarketplaceListingsResponse(
+    val listings: List<MarketplaceListing>
+)
+
+@Serializable
+data class MarketplaceListing(
+    val condition: String,
+    val price: Price?,          // Price is already defined elsewhere – do NOT redeclare
+    val id: Long? = null,
+    val status: String? = null,
+    val comments: String? = null
+)
+
+// IMPORTANT: Do NOT redeclare Price, MarketplaceStatsResponse, or PriceSuggestions here.
+// They are already defined elsewhere in your project.
+
+// ----------------------------
+// Retrofit API Interface
+// ----------------------------
 interface DiscogsApiService {
     @GET("releases/{releaseId}")
     suspend fun getRelease(
@@ -52,11 +86,6 @@ interface DiscogsApiService {
         @Header("Authorization") authHeader: String,
         @Header("User-Agent") userAgent: String = "MyDiscogsClone/1.0"
     ): DiscogsIdentityResponse
-
-    @Serializable
-    data class DiscogsIdentityResponse(
-        val username: String
-    )
 
     @GET("users/{username}/inventory")
     suspend fun getInventory(
@@ -111,11 +140,18 @@ interface DiscogsApiService {
         @Path("release_id") releaseId: Long,
         @Header("Authorization") authHeader: String,
         @Query("curr_abbr") currency: String = "USD"
-    ): MarketplaceStatsResponse
+    ): MarketplaceStatsResponse  // Already defined elsewhere
 
     @GET("marketplace/price_suggestions/{release_id}")
     suspend fun getPriceSuggestions(
         @Path("release_id") releaseId: Long,
         @Header("Authorization") authHeader: String
-    ): PriceSuggestions
+    ): PriceSuggestions  // Already defined elsewhere
+
+    @GET("marketplace/listings")
+    suspend fun getMarketplaceListings(
+        @Query("release_id") releaseId: Long,
+        @Query("status") status: String = "active",
+        @Header("Authorization") authHeader: String
+    ): MarketplaceListingsResponse  // NEW – defined above
 }

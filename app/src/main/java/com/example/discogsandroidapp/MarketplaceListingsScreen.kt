@@ -26,6 +26,9 @@ fun MarketplaceListingsScreen(
     var showSellDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
+    // 🆕 Collect the price suggestion state from ViewModel
+    val priceSuggestion by viewModel.conditionPriceSuggestion.collectAsState()
+
     val sortOptions = mapOf(
         "Lowest Price" to "price%2Casc",
         "Highest Price" to "price%2Cdesc",
@@ -126,9 +129,14 @@ fun MarketplaceListingsScreen(
             )
         }
 
+        // 🆕 Updated dialog with price suggestion support
         if (showSellDialog) {
             AddListingDialog(
-                onDismiss = { showSellDialog = false },
+                onDismiss = {
+                    showSellDialog = false
+                    // Optionally clear suggestion when dialog closes
+                    // viewModel.clearPriceSuggestion() // if you add that
+                },
                 onSave = { price: Double, condition: String, sleeveCondition: String, comments: String ->
                     Log.d("MARKETPLACE_LISTING", "Calling createListing with releaseId=$releaseId")
                     viewModel.createListing(
@@ -148,6 +156,17 @@ fun MarketplaceListingsScreen(
                         }
                     )
                     showSellDialog = false
+                },
+                // 🆕 Pass the suggestion and the callback
+                priceSuggestion = priceSuggestion,
+                onConditionsChanged = { condition, sleeveCondition ->
+                    // Trigger price suggestion lookup when user changes conditions
+                    viewModel.fetchPriceSuggestionForCondition(
+                        releaseId = releaseId,
+                        condition = condition,
+                        token = token,
+                        sleeveCondition = sleeveCondition
+                    )
                 }
             )
         }

@@ -199,15 +199,6 @@ data class DiscogsTrack(
     val duration: String? = null
 )
 
-@Serializable
-data class EditListingRequest(
-    val price: Double,
-    val condition: String,
-    @SerialName("sleeve_condition") val sleeve_condition: String,
-    val status: String,
-    val comments: String
-)
-
 // --- ORDERS & EVALUATIONS MODELS ---
 
 @Serializable

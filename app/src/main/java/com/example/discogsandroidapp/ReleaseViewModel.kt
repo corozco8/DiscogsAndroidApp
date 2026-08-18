@@ -34,13 +34,88 @@ sealed interface ProfileUiState {
 
 class ReleaseViewModel : ViewModel() {
 
+
     private val _uiState = MutableStateFlow<ReleaseUiState>(ReleaseUiState.Idle)
     val uiState: StateFlow<ReleaseUiState> = _uiState
 
     private val _profileUiState = MutableStateFlow<ProfileUiState>(ProfileUiState.Loading)
     val profileUiState: StateFlow<ProfileUiState> = _profileUiState
 
+    // --------------------------------------------
+    // NEW: State for condition-based price suggestion
+    // --------------------------------------------
+    private val _conditionPriceSuggestion = MutableStateFlow<Double?>(null)
+    val conditionPriceSuggestion: StateFlow<Double?> = _conditionPriceSuggestion
+
     private var currentUsername: String = ""
+    private var currentReleaseId: Long? = null   // Store the release ID for suggestions
+
+    // --------------------------------------------
+    // NEW: Function to fetch condition-based suggestions
+    // --------------------------------------------
+    fun fetchPriceSuggestionForCondition(
+        releaseId: Long,
+        condition: String,
+        token: String,
+        sleeveCondition: String? = null   // optional, can be used later
+    ) {
+        // Avoid spamming API: if condition is invalid, clear suggestion
+        if (condition.isBlank() || condition == "Not Graded") {
+            _conditionPriceSuggestion.value = null
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                _conditionPriceSuggestion.value = null  // Show loading state (null means fetching)
+
+                val authHeader = "Discogs token=$token"
+
+                // 1. Fetch active listings for this release
+                //    You'll need to have this endpoint in your RetrofitClient.apiService
+                val response = RetrofitClient.apiService.getMarketplaceListings(
+                    releaseId = releaseId,
+                    authHeader = authHeader,
+                    status = "active"   // Only active listings
+                )
+
+                // 2. Extract a clean keyword (e.g., "Very Good Plus" from "Very Good Plus (VG+)")
+                val cleanQueryCondition = condition.substringBefore("(").trim()
+
+                // 3. Filter by checking if the listing condition contains our keyword
+                val matchingListings = response.listings.filter { listing ->
+                    listing.condition.equals(condition, ignoreCase = true) ||
+                            listing.condition.contains(cleanQueryCondition, ignoreCase = true)
+                }
+
+                // 4. Extract prices and calculate median
+                val prices = matchingListings.mapNotNull { it.price?.value }.sorted()
+
+                val median = if (prices.isNotEmpty()) {
+                    if (prices.size % 2 == 0) {
+                        (prices[prices.size / 2 - 1] + prices[prices.size / 2]) / 2.0
+                    } else {
+                        prices[prices.size / 2]
+                    }
+                } else {
+                    null
+                }
+
+                _conditionPriceSuggestion.value = median
+
+                Log.d("PriceSuggestion", "Condition: $condition, Median: $median, Count: ${prices.size}")
+
+            } catch (e: Exception) {
+                Log.e("PriceSuggestion", "Failed to fetch suggestions", e)
+                // If error, set to -1.0 to indicate error (UI can show "No listings found")
+                _conditionPriceSuggestion.value = -1.0
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Keep existing navigation & fetching methods unchanged
+    // ------------------------------------------------------------
 
     fun navigateToOrders(token: String) {
         _uiState.value = ReleaseUiState.OrdersLoading
@@ -171,6 +246,9 @@ class ReleaseViewModel : ViewModel() {
             try {
                 val authHeader = "Discogs token=$token"
 
+                // Store releaseId for later suggestions
+                currentReleaseId = releaseId
+
                 // 1. Main Release Details
                 val releaseResponse = RetrofitClient.apiService.getRelease(
                     releaseId = releaseId,
@@ -293,7 +371,6 @@ class ReleaseViewModel : ViewModel() {
         token: String,
         onSuccess: () -> Unit
     ) {
-        // 🔍 Confirm the function is triggered
         Log.d("CREATE_LISTING", ">>> createListing CALLED with releaseId=$releaseId, price=$price, condition=$condition, sleeveCondition=$sleeveCondition, comments=$comments")
 
         viewModelScope.launch {
@@ -309,7 +386,6 @@ class ReleaseViewModel : ViewModel() {
                     status = "For Sale"
                 )
 
-                // 🔍 Log the outgoing request body
                 Log.d("CREATE_LISTING", "Sending request: $requestBody")
 
                 val response = RetrofitClient.apiService.createListing(
@@ -317,7 +393,6 @@ class ReleaseViewModel : ViewModel() {
                     request = requestBody
                 )
 
-                // 🔍 Log the HTTP status code
                 Log.d("CREATE_LISTING", "Response code: ${response.code()}")
 
                 if (response.isSuccessful) {
@@ -325,7 +400,6 @@ class ReleaseViewModel : ViewModel() {
                     onSuccess()
                     fetchStoreInventory(token, currentSort, currentSortOrder, reset = true)
                 } else {
-                    // 🔍 Log the full error body from Discogs
                     val errorBody = response.errorBody()?.string()
                     Log.e("CREATE_LISTING", "Error ${response.code()}: $errorBody")
 
@@ -334,7 +408,6 @@ class ReleaseViewModel : ViewModel() {
                     )
                 }
             } catch (e: Exception) {
-                // 🔍 Log any network or serialization exception
                 Log.e("CREATE_LISTING", "Network or serialization error", e)
                 _uiState.value = ReleaseUiState.Error("Network error: ${e.message}")
             }
