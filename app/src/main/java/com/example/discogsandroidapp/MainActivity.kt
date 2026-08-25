@@ -80,7 +80,6 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val uiState by viewModel.uiState.collectAsState()
                     val profileUiState by viewModel.profileUiState.collectAsState()
-                    val suggestedPrice by viewModel.conditionPriceSuggestion.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
@@ -272,7 +271,6 @@ class MainActivity : ComponentActivity() {
                                         ReleaseDetails(
                                             release = state.release,
                                             priceSummary = state.priceSummary,
-                                            priceSuggestion = suggestedPrice,
                                             onBackClick = { performSmartBack() },
                                             onSellConfirm = { price, condition, sleeve, comments ->
                                                 viewModel.createListing(
@@ -290,16 +288,6 @@ class MainActivity : ComponentActivity() {
                                             onViewListingsClick = { releaseId ->
                                                 marketplaceReleaseId = releaseId
                                             },
-                                            onConditionsChanged = { condition, sleeveCondition ->
-                                                state.release.id?.let { releaseId ->
-                                                    viewModel.fetchPriceSuggestionForCondition(
-                                                        releaseId = releaseId,
-                                                        condition = condition,
-                                                        token = token,
-                                                        sleeveCondition = sleeveCondition
-                                                    )
-                                                }
-                                            }
                                         )
                                     }
 

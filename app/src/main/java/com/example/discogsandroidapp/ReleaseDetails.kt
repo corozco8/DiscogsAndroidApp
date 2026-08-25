@@ -26,6 +26,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.launch
 import android.util.Log
+import androidx.compose.ui.window.Dialog
+import androidx.compose.material.icons.filled.Close
 
 private const val TAG = "ReleaseDetails"
 
@@ -33,11 +35,9 @@ private const val TAG = "ReleaseDetails"
 fun ReleaseDetails(
     release: DiscogsRelease,
     priceSummary: ReleasePriceSummary? = null,
-    priceSuggestion: Double? = null,
     onBackClick: () -> Unit,
     onSellConfirm: (price: Double, condition: String, sleeve: String, comments: String) -> Unit,
     onViewListingsClick: (releaseId: Long) -> Unit = {},
-    onConditionsChanged: (condition: String, sleeveCondition: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
@@ -51,9 +51,7 @@ fun ReleaseDetails(
                 showSellDialog = false
                 Log.d(TAG, "Sell confirmation: price=$price, condition='$condition', sleeve='$sleeve', comments='$comments'")
                 onSellConfirm(price, condition, sleeve, comments)
-            },
-            priceSuggestion = priceSuggestion,
-            onConditionsChanged = onConditionsChanged
+            }
         )
     }
 
@@ -158,7 +156,7 @@ fun ReleaseDetails(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Right side: Sleek, compact Sell button
+                // Right side: Sell button
                 FilledTonalButton(
                     onClick = { showSellDialog = true },
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -176,7 +174,7 @@ fun ReleaseDetails(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // REAL-TIME SALES RANGE CARD
+            // REAL-TIME SALES RANGE CARD (Market summary remains intact)
             SalesRangeCard(
                 summary = priceSummary ?: ReleasePriceSummary(),
                 onListingsClick = { release.id?.let { onViewListingsClick(it) } }
@@ -221,9 +219,7 @@ fun ReleaseDetails(
 @Composable
 fun AddListingDialog(
     onDismiss: () -> Unit,
-    onSave: (Double, String, String, String) -> Unit,
-    priceSuggestion: Double? = null,
-    onConditionsChanged: (String, String) -> Unit = { _, _ -> }
+    onSave: (Double, String, String, String) -> Unit
 ) {
     var price by remember { mutableStateOf("") }
     var condition by remember { mutableStateOf("") }
@@ -233,20 +229,71 @@ fun AddListingDialog(
     var conditionError by remember { mutableStateOf(false) }
     var priceError by remember { mutableStateOf(false) }
 
-    LaunchedEffect(condition, sleeveCondition) {
-        if (condition.isNotBlank() && condition != "Not Graded") {
-            onConditionsChanged(condition, sleeveCondition)
-        }
-    }
-
     val conditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Not Graded")
     val sleeveConditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Not Graded")
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("List Item For Sale") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Top Custom Header Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Text(
+                        text = "List Item For Sale",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    TextButton(onClick = {
+                        val cleanPriceString = price.replace(Regex("[^0-9.]"), "")
+                        val parsedPrice = cleanPriceString.toDoubleOrNull() ?: 0.0
+
+                        var hasError = false
+
+                        if (condition.isBlank() || condition == "Not Graded") {
+                            conditionError = true
+                            hasError = true
+                        } else {
+                            conditionError = false
+                        }
+
+                        if (parsedPrice <= 0.0) {
+                            priceError = true
+                            hasError = true
+                        } else {
+                            priceError = false
+                        }
+
+                        if (!hasError) {
+                            val finalSleeve = if (sleeveCondition.isBlank()) "Not Graded" else sleeveCondition
+                            onSave(parsedPrice, condition, finalSleeve, comments)
+                        }
+                    }) {
+                        Text("Save", fontWeight = FontWeight.Bold)
+                    }
+                }
 
                 // 1. Media Condition Scrollable Row
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -327,55 +374,23 @@ fun AddListingDialog(
                     }
                 }
 
-                // 3. Price Field with Suggestion Row
-                Column {
-                    OutlinedTextField(
-                        value = price,
-                        onValueChange = {
-                            price = it
-                            if (priceError) priceError = false
-                        },
-                        label = { Text("Price (USD)") },
-                        singleLine = true,
-                        isError = priceError,
-                        modifier = Modifier.fillMaxWidth(),
-                        supportingText = {
-                            if (priceError) {
-                                Text("Price must be greater than $0.00")
-                            }
-                        }
-                    )
-
-                    if (condition.isNotBlank() && condition != "Not Graded") {
-                        when {
-                            priceSuggestion == null -> {
-                                Text(
-                                    text = "Fetching market price for $condition...",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
-                                )
-                            }
-                            priceSuggestion > 0.0 -> {
-                                Text(
-                                    text = "💡 Suggested Price: $${String.format("%.2f", priceSuggestion)} (based on $condition listings)",
-                                    fontSize = 13.sp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
-                                )
-                            }
-                            else -> {
-                                Text(
-                                    text = "No active $condition listings found to suggest a price.",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
-                                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
-                                )
-                            }
+                // 3. Price Field
+                OutlinedTextField(
+                    value = price,
+                    onValueChange = {
+                        price = it
+                        if (priceError) priceError = false
+                    },
+                    label = { Text("Price (USD)") },
+                    singleLine = true,
+                    isError = priceError,
+                    modifier = Modifier.fillMaxWidth(),
+                    supportingText = {
+                        if (priceError) {
+                            Text("Price must be greater than $0.00")
                         }
                     }
-                }
+                )
 
                 // 4. Comments Field
                 OutlinedTextField(
@@ -386,38 +401,8 @@ fun AddListingDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-        },
-        confirmButton = {
-            Button(onClick = {
-                val cleanPriceString = price.replace(Regex("[^0-9.]"), "")
-                val parsedPrice = cleanPriceString.toDoubleOrNull() ?: 0.0
-
-                var hasError = false
-
-                if (condition.isBlank() || condition == "Not Graded") {
-                    conditionError = true
-                    hasError = true
-                } else {
-                    conditionError = false
-                }
-
-                if (parsedPrice <= 0.0) {
-                    priceError = true
-                    hasError = true
-                } else {
-                    priceError = false
-                }
-
-                if (!hasError) {
-                    val finalSleeve = if (sleeveCondition.isBlank()) "Not Graded" else sleeveCondition
-                    onSave(parsedPrice, condition, finalSleeve, comments)
-                }
-            }) { Text("List Item") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
         }
-    )
+    }
 }
 
 @Composable
