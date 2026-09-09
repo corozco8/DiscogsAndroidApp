@@ -26,7 +26,8 @@ Official Discogs app updates (v3.0+) introduced multi-step UI flows that require
 
 ## Coming Soon 
 - **AI Inventory Search***
-<img width="501" height="741" alt="image" src="https://github.com/user-attachments/assets/cacc84ea-8715-461e-96f2-c33fbb248b42" />
+<img width="489" height="880" alt="image" src="https://github.com/user-attachments/assets/a28731ba-dd39-401e-9d54-7999dc3b52e1" />
+
 
 
 ## Tech Stack
