@@ -24,6 +24,11 @@ Official Discogs app updates (v3.0+) introduced multi-step UI flows that require
 
 ---
 
+## Coming Soon 
+- **AI Inventory Search***
+<img width="501" height="741" alt="image" src="https://github.com/user-attachments/assets/cacc84ea-8715-461e-96f2-c33fbb248b42" />
+
+
 ## Tech Stack
 - **Language:** Kotlin
 - **UI Framework:** Jetpack Compose (Material 3)
