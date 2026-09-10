@@ -492,6 +492,54 @@ class MainActivity : ComponentActivity() {
                                             onViewListingsClick = { releaseId ->
                                                 marketplaceReleaseId = releaseId
                                             },
+
+                                            onViewVersionsClick = { masterId ->
+                                                viewModel.fetchMasterVersions(
+                                                    masterId = masterId,
+                                                    token = token
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.MasterVersionsLoading -> {
+                                        MasterVersionsScreen(
+                                            masterId = state.masterId,
+                                            versions = emptyList(),
+                                            totalItems = 0,
+                                            isLoading = true,
+                                            onBackClick = {
+                                                viewModel.returnFromMasterVersions()
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.MasterVersionsSuccess -> {
+                                        MasterVersionsScreen(
+                                            masterId = state.masterId,
+                                            versions = state.versions,
+                                            totalItems = state.totalItems,
+                                            onBackClick = {
+                                                viewModel.returnFromMasterVersions()
+                                            },
+                                            onVersionClick = { releaseId ->
+                                                viewModel.fetchRelease(
+                                                    releaseId = releaseId,
+                                                    token = token
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.MasterVersionsError -> {
+                                        MasterVersionsScreen(
+                                            masterId = state.masterId,
+                                            versions = emptyList(),
+                                            totalItems = 0,
+                                            errorMessage = state.message,
+                                            onBackClick = {
+                                                viewModel.returnFromMasterVersions()
+                                            }
                                         )
                                     }
 

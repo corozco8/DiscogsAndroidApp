@@ -169,5 +169,15 @@ interface DiscogsApiService {
         @Query("release_id") releaseId: Long,
         @Query("status") status: String = "active",
         @Header("Authorization") authHeader: String
-    ): MarketplaceListingsResponse  // NEW – defined above
+    ): MarketplaceListingsResponse
+
+    @GET("masters/{master_id}/versions")
+    suspend fun getMasterVersions(
+        @Path("master_id") masterId: Long,
+        @Header("Authorization") authHeader: String,
+        @Query("page") page: Int = 1,
+        @Query("per_page") perPage: Int = 100,
+        @Query("sort") sort: String = "released",
+        @Query("sort_order") sortOrder: String = "asc"
+    ): MasterVersionsResponse
 }

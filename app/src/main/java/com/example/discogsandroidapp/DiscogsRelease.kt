@@ -69,6 +69,22 @@ data class PriceSuggestions(
             (values[(size - 1) / 2] + values[size / 2]) / 2.0
         }
     }
+
+    fun forCondition(
+        condition: String
+    ): PriceSuggestionValue? {
+        return when (condition) {
+            "Mint (M)" -> mint
+            "Near Mint (NM or M-)" -> nearMint
+            "Very Good Plus (VG+)" -> veryGoodPlus
+            "Very Good (VG)" -> veryGood
+            "Good Plus (G+)" -> goodPlus
+            "Good (G)" -> good
+            "Fair (F)" -> fair
+            "Poor (P)" -> poor
+            else -> null
+        }
+    }
 }
 
 data class ReleasePriceSummary(
@@ -78,8 +94,349 @@ data class ReleasePriceSummary(
     val currency: String = "USD",
     val lastSold: String? = null,
     val numForSale: Int = 0,
-    val lowestAskingPrice: Double? = null
-)
+    val lowestAskingPrice: Double? = null,
+    val priceSuggestions: PriceSuggestions? = null
+) {
+    /**
+     * Seller-focused asking-price recommendation.
+     *
+     * Inputs are all real Discogs API signals already loaded for the release:
+     * 1. the selected condition's Discogs sold-price suggestion,
+     * 2. the full condition-price curve, used to smooth unusual grade values,
+     * 3. the current marketplace low,
+     * 4. the number of copies currently for sale.
+     *
+     * We use logarithmic/geometric blending because record prices can span
+     * very large ranges. This prevents one unusually high historical value
+     * from dominating the recommendation.
+     */
+    fun recommendedPriceFor(
+        condition: String,
+        sleeveCondition: String? = null
+    ): Double? {
+        /*
+         * Premium-grade pricing rules
+         *
+         * VG+ and below still use the original V1 pricing algorithm,
+         * except VG+ gets a modest sleeve-quality bump when the sleeve
+         * is also VG+ or better.
+         *
+         * Premium examples when the base VG+ recommendation is $30:
+         *
+         * VG+ media + lower sleeve  -> $30.00
+         * VG+ media + VG+ sleeve    -> $34.50  (1.15x)
+         *
+         * NM media + lower sleeve   -> $60.00  (2.0x)
+         * NM media + NM/M sleeve    -> $75.00  (2.5x)
+         *
+         * M media + non-M sleeve    -> $120.00 (4.0x)
+         * M media + M sleeve        -> $150.00 (5.0x)
+         */
+        val vgPlusAnchor =
+            originalRecommendationFor(
+                "Very Good Plus (VG+)"
+            )
+
+        if (
+            vgPlusAnchor != null &&
+            vgPlusAnchor > 0.0
+        ) {
+            when (condition) {
+                "Very Good Plus (VG+)" -> {
+                    val multiplier =
+                        if (
+                            sleeveCondition ==
+                            "Very Good Plus (VG+)" ||
+                            sleeveCondition ==
+                            "Near Mint (NM or M-)" ||
+                            sleeveCondition ==
+                            "Mint (M)"
+                        ) {
+                            1.15
+                        } else {
+                            1.0
+                        }
+
+                    return roundPrice(
+                        vgPlusAnchor * multiplier
+                    )
+                }
+
+                "Near Mint (NM or M-)" -> {
+                    val multiplier =
+                        if (
+                            sleeveCondition ==
+                            "Near Mint (NM or M-)" ||
+                            sleeveCondition ==
+                            "Mint (M)"
+                        ) {
+                            2.5
+                        } else {
+                            2.0
+                        }
+
+                    return roundPrice(
+                        vgPlusAnchor * multiplier
+                    )
+                }
+
+                "Mint (M)" -> {
+                    val multiplier =
+                        if (
+                            sleeveCondition ==
+                            "Mint (M)"
+                        ) {
+                            5.0
+                        } else {
+                            4.0
+                        }
+
+                    return roundPrice(
+                        vgPlusAnchor * multiplier
+                    )
+                }
+            }
+        }
+
+        // VG and every lower media grade keep the original
+        // seller-pricing algorithm unchanged.
+        return originalRecommendationFor(
+            condition
+        )
+    }
+
+    private fun originalRecommendationFor(
+        condition: String
+    ): Double? {
+        val suggestions =
+            priceSuggestions ?: return null
+
+        val targetRank =
+            conditionRank(condition) ?: return null
+
+        val directPrice =
+            suggestions
+                .forCondition(condition)
+                ?.value
+                ?.takeIf { it > 0.0 }
+                ?: return null
+
+        val points =
+            suggestions.conditionPricePoints()
+
+        val curvePrice =
+            predictConditionPrice(
+                points = points,
+                targetRank = targetRank
+            )
+
+        val historicalEstimate =
+            if (
+                curvePrice != null &&
+                curvePrice > 0.0
+            ) {
+                val ratio =
+                    directPrice / curvePrice
+
+                val directWeight =
+                    if (
+                        ratio < 0.55 ||
+                        ratio > 1.80
+                    ) {
+                        0.35
+                    } else {
+                        0.75
+                    }
+
+                geometricBlend(
+                    first = directPrice,
+                    second = curvePrice,
+                    firstWeight = directWeight
+                )
+            } else {
+                directPrice
+            }
+
+        val currentLow =
+            lowestAskingPrice
+                ?.takeIf { it > 0.0 }
+
+        if (currentLow == null) {
+            return roundPrice(
+                historicalEstimate
+            )
+        }
+
+        val marketWeight =
+            when {
+                numForSale >= 25 -> 0.55
+                numForSale >= 10 -> 0.50
+                numForSale >= 5 -> 0.40
+                numForSale >= 2 -> 0.30
+                else -> 0.20
+            }
+
+        val boundedMarketLow =
+            currentLow.coerceIn(
+                historicalEstimate * 0.10,
+                historicalEstimate * 3.00
+            )
+
+        val recommendation =
+            geometricBlend(
+                first = historicalEstimate,
+                second = boundedMarketLow,
+                firstWeight = 1.0 - marketWeight
+            )
+
+        return roundPrice(
+            recommendation
+        )
+    }
+
+    private fun conditionRank(
+        condition: String
+    ): Int? {
+        return when (condition) {
+            "Poor (P)" -> 0
+            "Fair (F)" -> 1
+            "Good (G)" -> 2
+            "Good Plus (G+)" -> 3
+            "Very Good (VG)" -> 4
+            "Very Good Plus (VG+)" -> 5
+            "Near Mint (NM or M-)" -> 6
+            "Mint (M)" -> 7
+            else -> null
+        }
+    }
+
+    private fun PriceSuggestions.conditionPricePoints():
+            List<Pair<Int, Double>> {
+
+        return listOfNotNull(
+            poor?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 0 to it },
+
+            fair?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 1 to it },
+
+            good?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 2 to it },
+
+            goodPlus?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 3 to it },
+
+            veryGood?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 4 to it },
+
+            veryGoodPlus?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 5 to it },
+
+            nearMint?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 6 to it },
+
+            mint?.value
+                ?.takeIf { it > 0.0 }
+                ?.let { 7 to it }
+        )
+    }
+
+    /**
+     * Fits a simple straight line to log(price) across all available
+     * condition grades. Predicting in log space makes the curve resistant
+     * to the huge dollar spreads common with collectible records.
+     */
+    private fun predictConditionPrice(
+        points: List<Pair<Int, Double>>,
+        targetRank: Int
+    ): Double? {
+        if (points.size < 3) {
+            return null
+        }
+
+        val xs =
+            points.map { it.first.toDouble() }
+
+        val ys =
+            points.map {
+                kotlin.math.ln(
+                    it.second
+                )
+            }
+
+        val meanX =
+            xs.average()
+
+        val meanY =
+            ys.average()
+
+        var numerator = 0.0
+        var denominator = 0.0
+
+        for (index in xs.indices) {
+            val dx =
+                xs[index] - meanX
+
+            numerator +=
+                dx * (ys[index] - meanY)
+
+            denominator +=
+                dx * dx
+        }
+
+        if (denominator == 0.0) {
+            return null
+        }
+
+        val slope =
+            numerator / denominator
+
+        val intercept =
+            meanY - slope * meanX
+
+        return kotlin.math.exp(
+            intercept +
+                    slope * targetRank.toDouble()
+        )
+    }
+
+    private fun geometricBlend(
+        first: Double,
+        second: Double,
+        firstWeight: Double
+    ): Double {
+        val safeWeight =
+            firstWeight.coerceIn(
+                0.0,
+                1.0
+            )
+
+        val secondWeight =
+            1.0 - safeWeight
+
+        return kotlin.math.exp(
+            safeWeight *
+                    kotlin.math.ln(first) +
+                    secondWeight *
+                    kotlin.math.ln(second)
+        )
+    }
+
+    private fun roundPrice(
+        value: Double
+    ): Double {
+        return kotlin.math.round(
+            value * 100.0
+        ) / 100.0
+    }
+}
 
 // --- RELEASE DETAILS MODELS ---
 
@@ -93,6 +450,12 @@ data class ListingRelease(
 )
 
 @Serializable
+data class DiscogsCommunity(
+    val have: Int = 0,
+    val want: Int = 0
+)
+
+@Serializable
 data class DiscogsRelease(
     val id: Long? = null,
     val title: String? = null,
@@ -100,15 +463,33 @@ data class DiscogsRelease(
     val thumb: String? = null,
     val country: String? = null,
     val released: String? = null,
-    @SerialName("last_sold") val last_sold: String? = null,
-    @SerialName("price_suggestions") val price_suggestions: PriceSuggestions? = null,
+    val community: DiscogsCommunity? = null,
+
+    @SerialName("master_id")
+    val masterId: Long? = null,
+
+    val notes: String? = null,
+
+    @SerialName("last_sold")
+    val last_sold: String? = null,
+
+    @SerialName("price_suggestions")
+    val price_suggestions: PriceSuggestions? = null,
+
     val genres: List<String>? = emptyList(),
     val styles: List<String>? = emptyList(),
     val images: List<DiscogsImage>? = emptyList(),
     val artists: List<DiscogsArtist>? = emptyList(),
     val labels: List<DiscogsLabel>? = emptyList(),
     val formats: List<DiscogsFormat>? = emptyList(),
-    val tracklist: List<DiscogsTrack>? = emptyList()
+    val tracklist: List<DiscogsTrack>? = emptyList(),
+
+    val companies: List<DiscogsCompany>? = emptyList(),
+
+    @SerialName("extraartists")
+    val extraArtists: List<DiscogsCredit>? = emptyList(),
+
+    val identifiers: List<DiscogsIdentifier>? = emptyList()
 )
 
 @Serializable
@@ -189,14 +570,46 @@ data class DiscogsLabel(
 
 @Serializable
 data class DiscogsFormat(
-    val name: String? = null
+    val name: String? = null,
+    val qty: String? = null,
+    val text: String? = null,
+    val descriptions: List<String>? = emptyList()
+)
+
+@Serializable
+data class DiscogsCredit(
+    val id: Long? = null,
+    val name: String? = null,
+    val anv: String? = null,
+    val role: String? = null,
+    val tracks: String? = null
 )
 
 @Serializable
 data class DiscogsTrack(
     val position: String? = null,
     val title: String? = null,
-    val duration: String? = null
+    val duration: String? = null,
+
+    @SerialName("extraartists")
+    val extraArtists: List<DiscogsCredit>? = emptyList()
+)
+
+@Serializable
+data class DiscogsCompany(
+    val id: Long? = null,
+    val name: String? = null,
+    val catno: String? = null,
+
+    @SerialName("entity_type_name")
+    val entityTypeName: String? = null
+)
+
+@Serializable
+data class DiscogsIdentifier(
+    val type: String? = null,
+    val value: String? = null,
+    val description: String? = null
 )
 
 // --- ORDERS & EVALUATIONS MODELS ---
@@ -258,6 +671,7 @@ data class DiscogsPagination(
     val per_page: Int? = 50,
     val items: Int? = 0
 )
+
 
 
 @Serializable

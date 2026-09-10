@@ -38,6 +38,7 @@ fun ReleaseDetails(
     onBackClick: () -> Unit,
     onSellConfirm: (price: Double, condition: String, sleeve: String, comments: String) -> Unit,
     onViewListingsClick: (releaseId: Long) -> Unit = {},
+    onViewVersionsClick: (masterId: Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
@@ -46,6 +47,7 @@ fun ReleaseDetails(
 
     if (showSellDialog) {
         AddListingDialog(
+            priceSummary = priceSummary,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeve, comments ->
                 showSellDialog = false
@@ -177,6 +179,8 @@ fun ReleaseDetails(
             // REAL-TIME SALES RANGE CARD (Market summary remains intact)
             SalesRangeCard(
                 summary = priceSummary ?: ReleasePriceSummary(),
+                haveCount = release.community?.have ?: 0,
+                wantCount = release.community?.want ?: 0,
                 onListingsClick = { release.id?.let { onViewListingsClick(it) } }
             )
 
@@ -204,13 +208,299 @@ fun ReleaseDetails(
                     } ?: "Unknown"
 
                     InfoRow("Label:", labelText)
-                    InfoRow("Format:", release.formats?.firstOrNull()?.name ?: "Vinyl")
+                    val formatText =
+                        release.formats
+                            ?.flatMap { format ->
+                                buildList {
+                                    format.name
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let { add(it) }
+
+                                    format.descriptions
+                                        ?.filter { it.isNotBlank() }
+                                        ?.let { addAll(it) }
+
+                                    format.text
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let { add(it) }
+                                }
+                            }
+                            ?.distinct()
+                            ?.joinToString(", ")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "Unknown"
+
+                    InfoRow("Format:", formatText)
                     InfoRow("Country:", release.country ?: "Unknown")
-                    InfoRow("Released:", release.year?.toString() ?: "Unknown")
+                    InfoRow(
+                        "Released:",
+                        release.released
+                            ?.takeIf { it.isNotBlank() }
+                            ?: release.year?.toString()
+                            ?: "Unknown"
+                    )
                     InfoRow("Genre:", release.genres?.joinToString(", ") ?: "Unknown")
                     InfoRow("Style:", release.styles?.joinToString(", ") ?: "Unknown")
                 }
             }
+
+            release.masterId?.let { masterId ->
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        onViewVersionsClick(masterId)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(
+                        text = "View All Versions of This Release",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            val tracks =
+                release.tracklist.orEmpty()
+
+            if (tracks.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(24.dp))
+
+                ReleaseInfoSection(
+                    title = "Tracklist"
+                ) {
+                    tracks.forEachIndexed { index, track ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    text = track.position.orEmpty(),
+                                    modifier = Modifier.width(44.dp),
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = track.title
+                                            ?: "Untitled",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+
+                                    track.extraArtists
+                                        .orEmpty()
+                                        .filter {
+                                            !it.name.isNullOrBlank() ||
+                                                    !it.role.isNullOrBlank()
+                                        }
+                                        .forEach { credit ->
+                                            Text(
+                                                text = buildString {
+                                                    if (!credit.role.isNullOrBlank()) {
+                                                        append(credit.role)
+                                                        append(" – ")
+                                                    }
+                                                    append(
+                                                        credit.name
+                                                            ?: "Unknown"
+                                                    )
+                                                },
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                }
+
+                                track.duration
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { duration ->
+                                        Text(
+                                            text = duration,
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                            }
+
+                            if (index != tracks.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(
+                                        vertical = 8.dp
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            val companies =
+                release.companies.orEmpty()
+
+            if (companies.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+
+                ReleaseInfoSection(
+                    title = "Companies, etc."
+                ) {
+                    companies.forEach { company ->
+                        Text(
+                            text = buildString {
+                                company.entityTypeName
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(it)
+                                        append(" – ")
+                                    }
+
+                                append(
+                                    company.name
+                                        ?: "Unknown"
+                                )
+
+                                company.catno
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(" – ")
+                                        append(it)
+                                    }
+                            },
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
+            val credits =
+                release.extraArtists.orEmpty()
+
+            if (credits.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+
+                ReleaseInfoSection(
+                    title = "Credits"
+                ) {
+                    credits.forEach { credit ->
+                        Text(
+                            text = buildString {
+                                credit.role
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(it)
+                                        append(" – ")
+                                    }
+
+                                append(
+                                    credit.name
+                                        ?: "Unknown"
+                                )
+
+                                credit.tracks
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(" (tracks: ")
+                                        append(it)
+                                        append(")")
+                                    }
+                            },
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
+            release.notes
+                ?.takeIf { it.isNotBlank() }
+                ?.let { notes ->
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    ReleaseInfoSection(
+                        title = "Notes"
+                    ) {
+                        Text(
+                            text = notes,
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp
+                        )
+                    }
+                }
+
+            val identifiers =
+                release.identifiers.orEmpty()
+
+            if (identifiers.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+
+                ReleaseInfoSection(
+                    title = "Barcode and Other Identifiers"
+                ) {
+                    identifiers.forEach { identifier ->
+                        Text(
+                            text = buildString {
+                                identifier.type
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(it)
+                                        append(": ")
+                                    }
+
+                                append(
+                                    identifier.value
+                                        ?: "Unknown"
+                                )
+
+                                identifier.description
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let {
+                                        append(" (")
+                                        append(it)
+                                        append(")")
+                                    }
+                            },
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun ReleaseInfoSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(
+            alpha = 0.35f
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = title,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            HorizontalDivider()
+
+            content()
         }
     }
 }
@@ -218,6 +508,7 @@ fun ReleaseDetails(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddListingDialog(
+    priceSummary: ReleasePriceSummary? = null,
     onDismiss: () -> Unit,
     onSave: (Double, String, String, String) -> Unit
 ) {
@@ -243,7 +534,7 @@ fun AddListingDialog(
                 modifier = Modifier
                     .padding(20.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Top Custom Header Row
                 Row(
@@ -385,12 +676,75 @@ fun AddListingDialog(
                     singleLine = true,
                     isError = priceError,
                     modifier = Modifier.fillMaxWidth(),
-                    supportingText = {
+                    supportingText =
                         if (priceError) {
-                            Text("Price must be greater than $0.00")
+                            {
+                                Text("Price must be greater than $0.00")
+                            }
+                        } else {
+                            null
+                        }
+                )
+
+                // Compact seller recommendation.
+                if (
+                    condition.isNotBlank() &&
+                    condition != "Not Graded"
+                ) {
+                    val recommendedPrice =
+                        priceSummary
+                            ?.recommendedPriceFor(
+                                condition = condition,
+                                sleeveCondition = sleeveCondition
+                            )
+                            ?.takeIf { it > 0.0 }
+
+                    if (recommendedPrice != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    horizontal = 4.dp,
+                                    vertical = 0.dp
+                                ),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Recommended ${getShortGrade(condition)}: $${
+                                    String.format(
+                                        java.util.Locale.getDefault(),
+                                        "%.2f",
+                                        recommendedPrice
+                                    )
+                                }",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+                            TextButton(
+                                onClick = {
+                                    price = String.format(
+                                        java.util.Locale.US,
+                                        "%.2f",
+                                        recommendedPrice
+                                    )
+                                    priceError = false
+                                },
+                                contentPadding = PaddingValues(
+                                    horizontal = 8.dp,
+                                    vertical = 0.dp
+                                )
+                            ) {
+                                Text(
+                                    text = "Use",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
-                )
+                }
 
                 // 4. Comments Field
                 OutlinedTextField(
@@ -408,6 +762,8 @@ fun AddListingDialog(
 @Composable
 fun SalesRangeCard(
     summary: ReleasePriceSummary,
+    haveCount: Int = 0,
+    wantCount: Int = 0,
     onListingsClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -432,20 +788,50 @@ fun SalesRangeCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Suggested Value",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Based on current market",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Have",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp
+                        )
+
+                        Spacer(
+                            modifier = Modifier.width(6.dp)
+                        )
+
+                        Text(
+                            text = haveCount.toString(),
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Want",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp
+                        )
+
+                        Spacer(
+                            modifier = Modifier.width(6.dp)
+                        )
+
+                        Text(
+                            text = wantCount.toString(),
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -544,4 +930,3 @@ fun SalesRangeCard(
         }
     }
 }
-

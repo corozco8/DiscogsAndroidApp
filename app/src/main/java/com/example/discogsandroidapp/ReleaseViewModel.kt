@@ -20,6 +20,22 @@ sealed interface ReleaseUiState {
         val release: DiscogsRelease,
         val priceSummary: ReleasePriceSummary? = null
     ) : ReleaseUiState
+
+    data class MasterVersionsLoading(
+        val masterId: Long
+    ) : ReleaseUiState
+
+    data class MasterVersionsSuccess(
+        val masterId: Long,
+        val versions: List<MasterVersion>,
+        val totalItems: Int
+    ) : ReleaseUiState
+
+    data class MasterVersionsError(
+        val masterId: Long,
+        val message: String
+    ) : ReleaseUiState
+
     data class Error(val message: String) : ReleaseUiState
     object Inventory : ReleaseUiState
     object Offers : ReleaseUiState
@@ -67,6 +83,9 @@ class ReleaseViewModel : ViewModel() {
 
     private var currentUsername: String = ""
     private var currentReleaseId: Long? = null   // Store the release ID for suggestions
+
+    private var releaseBeforeMasterVersions:
+            ReleaseUiState.ReleaseSuccess? = null
 
 
 
@@ -270,7 +289,8 @@ class ReleaseViewModel : ViewModel() {
                     currency = "USD",
                     lastSold = debugMsg,
                     numForSale = numForSale,
-                    lowestAskingPrice = lowestPrice
+                    lowestAskingPrice = lowestPrice,
+                    priceSuggestions = suggestions
                 )
 
                 _uiState.value = ReleaseUiState.ReleaseSuccess(
@@ -281,6 +301,91 @@ class ReleaseViewModel : ViewModel() {
                 _uiState.value = ReleaseUiState.Error(e.localizedMessage ?: "Failed to fetch details")
             }
         }
+    }
+
+    fun fetchMasterVersions(
+        masterId: Long,
+        token: String
+    ) {
+        val currentState = _uiState.value
+
+        if (currentState is ReleaseUiState.ReleaseSuccess) {
+            releaseBeforeMasterVersions = currentState
+        }
+
+        viewModelScope.launch {
+            _uiState.value =
+                ReleaseUiState.MasterVersionsLoading(
+                    masterId = masterId
+                )
+
+            try {
+                val authHeader =
+                    "Discogs token=$token"
+
+                val firstPage =
+                    RetrofitClient.apiService
+                        .getMasterVersions(
+                            masterId = masterId,
+                            authHeader = authHeader,
+                            page = 1,
+                            perPage = 100
+                        )
+
+                val allVersions =
+                    firstPage.versions.toMutableList()
+
+                val totalPages =
+                    firstPage.pagination?.pages ?: 1
+
+                if (totalPages > 1) {
+                    for (page in 2..totalPages) {
+                        val response =
+                            RetrofitClient.apiService
+                                .getMasterVersions(
+                                    masterId = masterId,
+                                    authHeader = authHeader,
+                                    page = page,
+                                    perPage = 100
+                                )
+
+                        allVersions.addAll(
+                            response.versions
+                        )
+                    }
+                }
+
+                _uiState.value =
+                    ReleaseUiState.MasterVersionsSuccess(
+                        masterId = masterId,
+                        versions = allVersions,
+                        totalItems =
+                            firstPage.pagination?.items
+                                ?: allVersions.size
+                    )
+
+            } catch (e: Exception) {
+                Log.e(
+                    "MASTER_VERSIONS",
+                    "Failed to load master versions",
+                    e
+                )
+
+                _uiState.value =
+                    ReleaseUiState.MasterVersionsError(
+                        masterId = masterId,
+                        message =
+                            e.localizedMessage
+                                ?: "Failed to load versions"
+                    )
+            }
+        }
+    }
+
+    fun returnFromMasterVersions() {
+        _uiState.value =
+            releaseBeforeMasterVersions
+                ?: ReleaseUiState.Idle
     }
 
     fun deleteListing(listingId: Long, token: String) {
