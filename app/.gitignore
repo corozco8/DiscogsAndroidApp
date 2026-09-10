@@ -1,1 +1,3 @@
-/build
+/backend/.env
+/backend/.venv/
+/backend/__pycache__/

@@ -11,7 +11,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,11 +25,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.discogsandroidapp.ui.theme.DiscogsAndroidAppTheme
-import androidx.compose.material.icons.filled.ShoppingCart
-import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Store
@@ -42,8 +38,6 @@ import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.text.KeyboardActions
@@ -57,19 +51,19 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Sell
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.material.icons.filled.AutoAwesome
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             val viewModel: ReleaseViewModel = viewModel()
+            val aiSearchViewModel: AiSearchViewModel = viewModel()
             // Your API Token
-            val token = "DKKLTsjxfrIOKuConcaqMLylNNaDIcxpypyQWDpG"
+            val token = BuildConfig.DISCOGS_TOKEN
 
             // Fetch the user profile as soon as the app opens!
             LaunchedEffect(Unit) {
@@ -120,62 +114,104 @@ class MainActivity : ComponentActivity() {
                             val context = LocalContext.current
                             val keyboardController = LocalSoftwareKeyboardController.current
                             val scanner = remember { GmsBarcodeScanning.getClient(context) }
+                            if (uiState !is ReleaseUiState.AiSearch) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
 
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (uiState !is ReleaseUiState.Idle && uiState !is ReleaseUiState.Loading) {
-                                    IconButton(onClick = { performSmartBack() }) {
-                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                                    }
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                }
-
-                                OutlinedTextField(
-                                    value = searchQuery,
-                                    onValueChange = { searchQuery = it },
-                                    label = {
-                                        Text("Search...", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                    keyboardActions = KeyboardActions(
-                                        onSearch = {
-                                            viewModel.search(searchQuery, token)
-                                            keyboardController?.hide()
-                                        }
-                                    ),
-                                    trailingIcon = {
-                                        if (searchQuery.isNotEmpty()) {
-                                            IconButton(onClick = { searchQuery = "" }) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Clear,
-                                                    contentDescription = "Clear Search"
-                                                )
+                                    if (
+                                        uiState !is ReleaseUiState.Idle &&
+                                        uiState !is ReleaseUiState.Loading
+                                    ) {
+                                        IconButton(
+                                            onClick = {
+                                                performSmartBack()
                                             }
+                                        ) {
+                                            Icon(
+                                                Icons.AutoMirrored.Filled.ArrowBack,
+                                                contentDescription = "Back"
+                                            )
                                         }
-                                    }
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
 
-                                Button(
-                                    onClick = {
-                                        scanner.startScan()
-                                            .addOnSuccessListener { barcode ->
-                                                barcode.rawValue?.let { scannedValue ->
-                                                    searchQuery = scannedValue
-                                                    viewModel.search(scannedValue, token)
-                                                    keyboardController?.hide()
+                                        Spacer(
+                                            modifier = Modifier.width(4.dp)
+                                        )
+                                    }
+
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = {
+                                            searchQuery = it
+                                        },
+                                        label = {
+                                            Text(
+                                                "Search...",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(
+                                            imeAction = ImeAction.Search
+                                        ),
+                                        keyboardActions = KeyboardActions(
+                                            onSearch = {
+                                                viewModel.search(
+                                                    searchQuery,
+                                                    token
+                                                )
+                                                keyboardController?.hide()
+                                            }
+                                        ),
+                                        trailingIcon = {
+                                            if (searchQuery.isNotEmpty()) {
+                                                IconButton(
+                                                    onClick = {
+                                                        searchQuery = ""
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Clear,
+                                                        contentDescription = "Clear Search"
+                                                    )
                                                 }
                                             }
-                                    },
-                                    contentPadding = PaddingValues(12.dp)
-                                ) {
-                                    Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan Barcode")
+                                        }
+                                    )
+
+                                    Spacer(
+                                        modifier = Modifier.width(8.dp)
+                                    )
+
+                                    Button(
+                                        onClick = {
+                                            scanner.startScan()
+                                                .addOnSuccessListener { barcode ->
+                                                    barcode.rawValue?.let { scannedValue ->
+
+                                                        searchQuery = scannedValue
+
+                                                        viewModel.search(
+                                                            scannedValue,
+                                                            token
+                                                        )
+
+                                                        keyboardController?.hide()
+                                                    }
+                                                }
+                                        },
+                                        contentPadding = PaddingValues(12.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.QrCodeScanner,
+                                            contentDescription = "Scan Barcode"
+                                        )
+                                    }
                                 }
                             }
 
@@ -187,6 +223,15 @@ class MainActivity : ComponentActivity() {
                                 contentAlignment = Alignment.Center
                             ) {
                                 when (val state = uiState) {
+                                    is ReleaseUiState.AiSearch -> {
+                                        AiSearchScreen(
+                                            viewModel = aiSearchViewModel,
+                                            onBackClick = {
+                                                aiSearchViewModel.clearSearch()
+                                                viewModel.resetToIdle()
+                                            }
+                                        )
+                                    }
                                     // THIS WAS THE MISSING BLOCK!
                                     is ReleaseUiState.Idle -> {
                                         when (val pState = profileUiState) {
@@ -194,17 +239,45 @@ class MainActivity : ComponentActivity() {
                                             is ProfileUiState.Success -> {
                                                 ProfileDashboard(
                                                     profile = pState.profile,
-                                                    onStoreClick = { viewModel.fetchStoreInventory(token) },
-                                                    onOrdersClick = { viewModel.navigateToOrders(token) },
-                                                    onInventoryClick = { viewModel.navigateToInventory() },
-                                                    onOffersClick = { viewModel.navigateToOffers() },
-                                                    onSellerRatingClick = {
-                                                        val currentUsername = pState.profile.username ?: "kingchapstick"
-                                                        viewModel.openRatings(username = currentUsername, ratingType = "seller")
+
+                                                    onStoreClick = {
+                                                        viewModel.fetchStoreInventory(token)
                                                     },
+
+                                                    onAiSearchClick = {
+                                                        viewModel.navigateToAiSearch()
+                                                    },
+
+                                                    onOrdersClick = {
+                                                        viewModel.navigateToOrders(token)
+                                                    },
+
+                                                    onInventoryClick = {
+                                                        viewModel.navigateToInventory()
+                                                    },
+
+                                                    onOffersClick = {
+                                                        viewModel.navigateToOffers()
+                                                    },
+
+                                                    onSellerRatingClick = {
+                                                        val currentUsername =
+                                                            pState.profile.username ?: "kingchapstick"
+
+                                                        viewModel.openRatings(
+                                                            username = currentUsername,
+                                                            ratingType = "seller"
+                                                        )
+                                                    },
+
                                                     onBuyerRatingClick = {
-                                                        val currentUsername = pState.profile.username ?: "kingchapstick"
-                                                        viewModel.openRatings(username = currentUsername, ratingType = "buyer")
+                                                        val currentUsername =
+                                                            pState.profile.username ?: "kingchapstick"
+
+                                                        viewModel.openRatings(
+                                                            username = currentUsername,
+                                                            ratingType = "buyer"
+                                                        )
                                                     }
                                                 )
                                             }
@@ -373,9 +446,11 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
 
-                                    is ReleaseUiState.Inventory -> PlaceholderScreen("Inventory List")
+                                    is ReleaseUiState.Inventory ->
+                                        PlaceholderScreen("Inventory List")
 
-                                    is ReleaseUiState.Offers -> PlaceholderScreen("Pending Offers")
+                                    is ReleaseUiState.Offers ->
+                                        PlaceholderScreen("Pending Offers")
 
                                     else -> {
                                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -397,6 +472,7 @@ class MainActivity : ComponentActivity() {
 fun ProfileDashboard(
     profile: DiscogsProfile,
     onStoreClick: () -> Unit,
+    onAiSearchClick: () -> Unit,
     onOrdersClick: () -> Unit,
     onInventoryClick: () -> Unit,
     onOffersClick: () -> Unit,
@@ -509,9 +585,30 @@ fun ProfileDashboard(
         )
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            MenuBrick(title = "My Store", icon = Icons.Default.Store, onClick = onStoreClick)
-            MenuBrick(title = "My Orders", icon = Icons.Default.Receipt, onClick = onOrdersClick)
-            MenuBrick(title = "My Offers", icon = Icons.Default.LocalOffer, onClick = onOffersClick)
+
+            MenuBrick(
+                title = "My Store",
+                icon = Icons.Default.Store,
+                onClick = onStoreClick
+            )
+
+            MenuBrick(
+                title = "AI Inventory Search",
+                icon = Icons.Default.AutoAwesome,
+                onClick = onAiSearchClick
+            )
+
+            MenuBrick(
+                title = "My Orders",
+                icon = Icons.Default.Receipt,
+                onClick = onOrdersClick
+            )
+
+            MenuBrick(
+                title = "My Offers",
+                icon = Icons.Default.LocalOffer,
+                onClick = onOffersClick
+            )
         }
     }
 }

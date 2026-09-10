@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+/backend/.env
+/backend/.venv/
+/backend/__pycache__/
+/backend/inventory_cache.json
+/backend/release_metadata_cache.json
+/backend/release_metadata_cache.json.tmp
+/build/
+/app/build/

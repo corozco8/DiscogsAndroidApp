@@ -12,6 +12,7 @@ sealed interface ReleaseUiState {
     object Loading : ReleaseUiState
     object StoreLoading : ReleaseUiState
     object OrdersLoading : ReleaseUiState
+    object AiSearch : ReleaseUiState
     data class StoreSuccess(val listings: List<InventoryListing>, val totalItems: Int, val isFetchingMore: Boolean) : ReleaseUiState
     data class OrdersSuccess(val orders: List<DiscogsOrder>) : ReleaseUiState
     data class SearchSuccess(val results: List<SearchResult>) : ReleaseUiState
@@ -57,6 +58,10 @@ class ReleaseViewModel : ViewModel() {
 
     fun navigateToOrderDetails(order: DiscogsOrder) {
         _uiState.value = ReleaseUiState.OrderDetails(order)
+    }
+
+    fun navigateToAiSearch() {
+        _uiState.value = ReleaseUiState.AiSearch
     }
 
     fun updateOrderStatus(orderId: String, newStatus: String, token: String) {
