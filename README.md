@@ -4,7 +4,11 @@ A streamlined Android application built specifically for high-volume Discogs mar
 
 The project focuses on reducing the number of taps, screens, and repeated actions required to list records, manage inventory, review orders, and search a large Discogs store.
 
-https://github.com/user-attachments/assets/c7271669-9a67-4523-bc36-de1990e27562
+
+
+https://github.com/user-attachments/assets/9ebdde79-c62a-4003-9a32-dfba41f2141e
+
+
 
 ## Design Philosophy
 
