@@ -20,6 +20,7 @@ class InventoryResult(BaseModel):
 
     condition: str | None = None
     sleeveCondition: str | None = None
+    comments: str = ""
 
     price: float | None = None
     currency: str | None = None

@@ -1,12 +1,11 @@
 import json
-from pathlib import Path
 import time
+from pathlib import Path
+
 from release_metadata_cache import (
-    get_release_metadata,
-    get_missing_release_ids
+    get_release_metadata
 )
 from discogs_client import fetch_all_inventory
-
 
 
 CACHE_FILE = (
@@ -54,6 +53,10 @@ def normalize_listing(listing):
             "sleeve_condition"
         ),
 
+        # Preserve the seller's existing Discogs listing comments
+        # so the Android edit dialog can safely display and resave them.
+        "comments": listing.get("comments") or "",
+
         "price": price.get("value"),
         "currency": price.get("currency"),
 
@@ -83,6 +86,17 @@ def load_cache():
         _inventory_cache = json.load(file)
 
     _last_sync_time = CACHE_FILE.stat().st_mtime
+
+
+def ensure_cache_current():
+    # FastAPI and the MCP server run in separate Python processes.
+    # Reload the small local JSON cache before every AI inventory
+    # search so the MCP process always sees edits/deletions written
+    # by the FastAPI process.
+    if not CACHE_FILE.exists():
+        return
+
+    load_cache()
 
 
 async def refresh_cache():
@@ -131,6 +145,66 @@ def get_release_ids():
     return sorted(release_ids)
 
 
+def remove_listings_from_cache(
+    listing_ids
+):
+    """
+    Remove deleted Discogs listings from the in-memory cache
+    and inventory_cache.json immediately.
+    """
+    global _inventory_cache
+    global _last_sync_time
+
+    ids_to_remove = {
+        int(listing_id)
+        for listing_id in listing_ids
+        if listing_id is not None
+    }
+
+    if not ids_to_remove:
+        return 0
+
+    before_count = len(_inventory_cache)
+
+    _inventory_cache = [
+        listing
+        for listing in _inventory_cache
+        if (
+            int(listing.get("listingId"))
+            if listing.get("listingId") is not None
+            else -1
+        ) not in ids_to_remove
+    ]
+
+    removed_count = (
+        before_count
+        - len(_inventory_cache)
+    )
+
+    if removed_count > 0:
+        with open(
+            CACHE_FILE,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                _inventory_cache,
+                file,
+                ensure_ascii=False
+            )
+
+        _last_sync_time = (
+            CACHE_FILE.stat().st_mtime
+        )
+
+        print(
+            f"Removed {removed_count} deleted "
+            f"listing(s) from inventory cache"
+        )
+
+    return removed_count
+
+
 def search_inventory(
     artist: str | None = None,
     title: str | None = None,
@@ -155,34 +229,6 @@ def search_inventory(
     limit: int = 100
 ):
     ensure_cache_current()
-    metadata_filter_requested = any([
-        genre,
-        style,
-        label,
-        year is not None,
-        min_year is not None,
-        max_year is not None,
-        format_name,
-        catalog_number
-    ])
-
-    if metadata_filter_requested:
-        release_ids = get_release_ids()
-
-        missing = get_missing_release_ids(
-            release_ids
-        )
-
-        if missing:
-            indexed = (
-                len(release_ids)
-                - len(missing)
-            )
-
-            raise RuntimeError(
-                f"Release metadata indexing is still in progress: "
-                f"{indexed}/{len(release_ids)} releases indexed."
-            )
 
     matches = []
 
@@ -398,6 +444,7 @@ def search_inventory(
 
     return matches[:safe_limit]
 
+
 def get_cache_age_seconds():
     if _last_sync_time == 0:
         return None
@@ -417,14 +464,3 @@ def cache_needs_refresh(
 
 
 load_cache()
-
-def ensure_cache_current():
-    global _last_sync_time
-
-    if not CACHE_FILE.exists():
-        return
-
-    file_modified_time = CACHE_FILE.stat().st_mtime
-
-    if file_modified_time > _last_sync_time:
-        load_cache()

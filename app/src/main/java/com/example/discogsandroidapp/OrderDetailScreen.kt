@@ -8,6 +8,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -15,15 +19,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrderDetailScreen(
     order: DiscogsOrder,
+    messageState: OrderMessagesUiState,
     onBackClick: () -> Unit,
     onStatusChange: (String) -> Unit,
-    onItemClick: (Int) -> Unit // <-- ADD THIS PARAMETER
+    onItemClick: (Int) -> Unit,
+    onSendMessage: (String) -> Unit
 ) {
+    var messageText by remember(order.id) {
+        mutableStateOf("")
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -79,7 +91,7 @@ fun OrderDetailScreen(
                 )
             }
 
-            // 2. Items List
+            // 5. Items List
             val items = order.items ?: emptyList()
             if (items.isNotEmpty()) {
                 item {
@@ -175,7 +187,7 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // 3. Financial Totals
+                // 6. Financial Totals
                 item {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     val currency = order.total?.currency ?: "$"
@@ -197,7 +209,7 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // 4. Buyer Info
+                // 7. Buyer Info
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -221,7 +233,379 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // 5. Action Buttons
+                // 8. Messages Header
+                item {
+                    val messageCount =
+                        (messageState as? OrderMessagesUiState.Success)
+                            ?.messages
+                            ?.size
+                            ?: 0
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Messages",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        if (messageCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.secondaryContainer
+                            ) {
+                                Text(
+                                    text = "$messageCount",
+                                    modifier = Modifier.padding(
+                                        horizontal = 10.dp,
+                                        vertical = 4.dp
+                                    ),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 9. Message Composer - above message history
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        elevation = CardDefaults.cardElevation(
+                            defaultElevation = 2.dp
+                        ),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp)
+                        ) {
+                            Text(
+                                text = "Message buyer",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            Spacer(
+                                modifier = Modifier.height(8.dp)
+                            )
+
+                            OutlinedTextField(
+                                value = messageText,
+                                onValueChange = {
+                                    messageText = it
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = {
+                                    Text("Type a message...")
+                                },
+                                minLines = 2,
+                                maxLines = 5,
+                                shape = RoundedCornerShape(14.dp),
+                                keyboardOptions = KeyboardOptions(
+                                    imeAction = ImeAction.Send
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onSend = {
+                                        val message =
+                                            messageText.trim()
+
+                                        if (message.isNotEmpty()) {
+                                            onSendMessage(message)
+                                            messageText = ""
+                                        }
+                                    }
+                                )
+                            )
+
+                            Spacer(
+                                modifier = Modifier.height(10.dp)
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                Button(
+                                    onClick = {
+                                        val message =
+                                            messageText.trim()
+
+                                        if (message.isNotEmpty()) {
+                                            onSendMessage(message)
+                                            messageText = ""
+                                        }
+                                    },
+                                    enabled = messageText.isNotBlank(),
+                                    shape = RoundedCornerShape(50)
+                                ) {
+                                    Text("Send")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 10. Message History - newest first
+                when (messageState) {
+                    OrderMessagesUiState.Idle,
+                    OrderMessagesUiState.Loading -> {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(20.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.dp
+                                    )
+
+                                    Spacer(
+                                        modifier = Modifier.width(12.dp)
+                                    )
+
+                                    Text(
+                                        text = "Loading conversation...",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    is OrderMessagesUiState.Error -> {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer
+                                )
+                            ) {
+                                Text(
+                                    text = "Could not load messages: ${messageState.message}",
+                                    modifier = Modifier.padding(16.dp),
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+
+                    is OrderMessagesUiState.Success -> {
+                        // Newest message at the top, oldest at the bottom.
+                        val messages =
+                            messageState.messages.sortedByDescending { message ->
+                                message.timestamp ?: ""
+                            }
+
+                        if (messages.isEmpty()) {
+                            item {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text(
+                                            text = "No messages yet",
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+
+                                        Spacer(
+                                            modifier = Modifier.height(4.dp)
+                                        )
+
+                                        Text(
+                                            text = "Start the conversation with the buyer below.",
+                                            fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            items(
+                                items = messages,
+                                key = { message ->
+                                    message.id
+                                        ?: "${message.timestamp}-${message.message}-${message.subject}"
+                                }
+                            ) { orderMessage ->
+
+                                val buyerUsername =
+                                    order.buyer?.username
+
+                                val senderUsername =
+                                    orderMessage.from?.username
+
+                                val isBuyer =
+                                    !senderUsername.isNullOrBlank() &&
+                                            senderUsername == buyerUsername
+
+                                val isSeller =
+                                    !senderUsername.isNullOrBlank() &&
+                                            senderUsername != buyerUsername
+
+                                val body =
+                                    orderMessage.message
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: orderMessage.subject
+                                        ?: "Order update"
+
+                                if (!isBuyer && !isSeller) {
+                                    // Discogs/system order event.
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(
+                                                    horizontal = 14.dp,
+                                                    vertical = 8.dp
+                                                ),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Text(
+                                                    text = body,
+                                                    fontSize = 12.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+
+                                                orderMessage.timestamp?.let { timestamp ->
+                                                    Spacer(
+                                                        modifier = Modifier.height(2.dp)
+                                                    )
+
+                                                    Text(
+                                                        text = formatOrderMessageTimestamp(timestamp),
+                                                        fontSize = 10.sp,
+                                                        color = MaterialTheme.colorScheme.outline
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement =
+                                            if (isBuyer) {
+                                                Arrangement.Start
+                                            } else {
+                                                Arrangement.End
+                                            }
+                                    ) {
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(0.84f),
+                                            shape =
+                                                if (isBuyer) {
+                                                    RoundedCornerShape(
+                                                        topStart = 6.dp,
+                                                        topEnd = 18.dp,
+                                                        bottomStart = 18.dp,
+                                                        bottomEnd = 18.dp
+                                                    )
+                                                } else {
+                                                    RoundedCornerShape(
+                                                        topStart = 18.dp,
+                                                        topEnd = 6.dp,
+                                                        bottomStart = 18.dp,
+                                                        bottomEnd = 18.dp
+                                                    )
+                                                },
+                                            colors = CardDefaults.cardColors(
+                                                containerColor =
+                                                    if (isBuyer) {
+                                                        MaterialTheme.colorScheme.surfaceVariant
+                                                    } else {
+                                                        MaterialTheme.colorScheme.primaryContainer
+                                                    }
+                                            )
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(14.dp)
+                                            ) {
+                                                Text(
+                                                    text =
+                                                        if (isBuyer) {
+                                                            senderUsername ?: "Buyer"
+                                                        } else {
+                                                            "You"
+                                                        },
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.sp,
+                                                    color =
+                                                        if (isBuyer) {
+                                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                                        } else {
+                                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                                        }
+                                                )
+
+                                                Spacer(
+                                                    modifier = Modifier.height(5.dp)
+                                                )
+
+                                                Text(
+                                                    text = body,
+                                                    fontSize = 14.sp,
+                                                    lineHeight = 20.sp
+                                                )
+
+                                                orderMessage.timestamp?.let { timestamp ->
+                                                    Spacer(
+                                                        modifier = Modifier.height(7.dp)
+                                                    )
+
+                                                    Text(
+                                                        text = formatOrderMessageTimestamp(timestamp),
+                                                        fontSize = 10.sp,
+                                                        color =
+                                                            if (isBuyer) {
+                                                                MaterialTheme.colorScheme.outline
+                                                            } else {
+                                                                MaterialTheme.colorScheme.onPrimaryContainer.copy(
+                                                                    alpha = 0.7f
+                                                                )
+                                                            }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 11. Action Buttons
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
@@ -248,3 +632,20 @@ fun OrderDetailScreen(
         }
     }
 }
+
+private fun formatOrderMessageTimestamp(
+    timestamp: String
+): String {
+    // Discogs timestamps are ISO-style strings. This keeps the UI
+    // readable without requiring extra date/time dependencies.
+    val cleaned = timestamp
+        .replace("T", " ")
+        .replace("Z", "")
+
+    return if (cleaned.length >= 16) {
+        cleaned.take(16)
+    } else {
+        cleaned
+    }
+}
+

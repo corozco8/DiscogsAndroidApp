@@ -127,6 +127,22 @@ interface DiscogsApiService {
         @Query("sort_order") sortOrder: String = "desc"
     ): Call<DiscogsOrdersResponse>
 
+
+    @GET("marketplace/orders/{order_id}/messages")
+    suspend fun getOrderMessages(
+        @Path("order_id") orderId: String,
+        @Header("Authorization") authHeader: String,
+        @Query("page") page: Int = 1,
+        @Query("per_page") perPage: Int = 100
+    ): DiscogsOrderMessagesResponse
+
+    @POST("marketplace/orders/{order_id}/messages")
+    suspend fun sendOrderMessage(
+        @Path("order_id") orderId: String,
+        @Header("Authorization") authHeader: String,
+        @Body request: AddOrderMessageRequest
+    ): DiscogsOrderMessage
+
     @GET("users/{username}/feedback")
     fun getUserEvaluations(
         @Path("username") username: String,

@@ -259,6 +259,37 @@ data class DiscogsPagination(
     val items: Int? = 0
 )
 
+
+@Serializable
+data class DiscogsOrderMessagesResponse(
+    val messages: List<DiscogsOrderMessage> = emptyList(),
+    val pagination: DiscogsPagination? = null
+)
+
+@Serializable
+data class DiscogsOrderMessage(
+    val id: String? = null,
+    val subject: String? = null,
+    val message: String? = null,
+    val type: String? = null,
+    val timestamp: String? = null,
+    @SerialName("from") val from: OrderMessageUser? = null,
+    val to: OrderMessageUser? = null
+)
+
+@Serializable
+data class OrderMessageUser(
+    val id: Long? = null,
+    val username: String? = null,
+    @SerialName("resource_url") val resourceUrl: String? = null
+)
+
+@Serializable
+data class AddOrderMessageRequest(
+    val message: String,
+    val status: String? = null
+)
+
 @Serializable
 data class DiscogsEvaluationsResponse(
     val feedback: List<DiscogsEvaluation>? = emptyList(),

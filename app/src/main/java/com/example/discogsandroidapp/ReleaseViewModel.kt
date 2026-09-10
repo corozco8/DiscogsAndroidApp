@@ -33,6 +33,20 @@ sealed interface ProfileUiState {
     data class Error(val message: String) : ProfileUiState
 }
 
+
+sealed interface OrderMessagesUiState {
+    data object Idle : OrderMessagesUiState
+    data object Loading : OrderMessagesUiState
+
+    data class Success(
+        val messages: List<DiscogsOrderMessage>
+    ) : OrderMessagesUiState
+
+    data class Error(
+        val message: String
+    ) : OrderMessagesUiState
+}
+
 class ReleaseViewModel : ViewModel() {
 
 
@@ -41,6 +55,15 @@ class ReleaseViewModel : ViewModel() {
 
     private val _profileUiState = MutableStateFlow<ProfileUiState>(ProfileUiState.Loading)
     val profileUiState: StateFlow<ProfileUiState> = _profileUiState
+
+
+    private val _orderMessagesUiState =
+        MutableStateFlow<OrderMessagesUiState>(
+            OrderMessagesUiState.Idle
+        )
+
+    val orderMessagesUiState: StateFlow<OrderMessagesUiState> =
+        _orderMessagesUiState
 
     private var currentUsername: String = ""
     private var currentReleaseId: Long? = null   // Store the release ID for suggestions
@@ -56,8 +79,25 @@ class ReleaseViewModel : ViewModel() {
         fetchOrders(token)
     }
 
-    fun navigateToOrderDetails(order: DiscogsOrder) {
+    fun navigateToOrderDetails(
+        order: DiscogsOrder,
+        token: String
+    ) {
         _uiState.value = ReleaseUiState.OrderDetails(order)
+
+        val orderId = order.id
+
+        if (orderId != null) {
+            loadOrderMessages(
+                orderId = orderId,
+                token = token
+            )
+        } else {
+            _orderMessagesUiState.value =
+                OrderMessagesUiState.Error(
+                    "This order does not have an ID."
+                )
+        }
     }
 
     fun navigateToAiSearch() {
@@ -247,18 +287,162 @@ class ReleaseViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 _uiState.value = ReleaseUiState.StoreLoading
-                val response =
-                    RetrofitClient.apiService.deleteListing(listingId, "Discogs token=$token")
 
-                if (response.isSuccessful) {
-                    fetchStoreInventory(token, currentSort, currentSortOrder, reset = true)
+                val response =
+                    RetrofitClient.apiService.deleteListing(
+                        listingId,
+                        "Discogs token=$token"
+                    )
+
+                if (response.isSuccessful || response.code() == 404) {
+
+                    // 404 means the listing is already gone from Discogs.
+                    // In either case, remove any stale copy from the AI cache.
+                    // Keep the FastAPI AI inventory cache in sync with Discogs.
+                    try {
+                        BackendRetrofitClient.apiService.removeFromInventoryCache(
+                            RemoveInventoryCacheRequest(
+                                listingIds = listOf(listingId)
+                            )
+                        )
+                    } catch (cacheError: Exception) {
+                        Log.e(
+                            "INVENTORY_CACHE",
+                            "Discogs delete succeeded, but backend cache removal failed for $listingId",
+                            cacheError
+                        )
+                    }
+
+                    fetchStoreInventory(
+                        token,
+                        currentSort,
+                        currentSortOrder,
+                        reset = true
+                    )
+
                 } else {
                     _uiState.value =
-                        ReleaseUiState.Error("Failed to delete. HTTP Code: ${response.code()}")
+                        ReleaseUiState.Error(
+                            "Failed to delete. HTTP Code: ${response.code()}"
+                        )
                 }
+
             } catch (e: Exception) {
-                _uiState.value = ReleaseUiState.Error("Network error: ${e.message}")
+                _uiState.value =
+                    ReleaseUiState.Error(
+                        "Network error: ${e.message}"
+                    )
             }
+        }
+    }
+
+    /**
+     * Deletes one or more listings while keeping the user on the AI Search screen.
+     *
+     * Unlike deleteListing(), this does NOT switch the main UI to StoreLoading
+     * and does NOT refresh the regular Store screen after every deletion.
+     *
+     * Requests are performed sequentially to avoid hammering the Discogs API.
+     */
+    fun deleteListingsFromAiSearch(
+        listingIds: List<Long>,
+        token: String,
+        onListingDeleted: (Long) -> Unit = {},
+        onComplete: (deletedCount: Int, failedCount: Int) -> Unit = { _, _ -> }
+    ) {
+        if (listingIds.isEmpty()) {
+            onComplete(0, 0)
+            return
+        }
+
+        viewModelScope.launch {
+            val uniqueIds = listingIds.distinct()
+            val authHeader = "Discogs token=$token"
+
+            val successfullyDeletedIds = mutableListOf<Long>()
+            var failedCount = 0
+
+            for (listingId in uniqueIds) {
+                try {
+                    val response =
+                        RetrofitClient.apiService.deleteListing(
+                            listingId = listingId,
+                            authHeader = authHeader
+                        )
+
+                    if (
+                        response.isSuccessful ||
+                        response.code() == 404
+                    ) {
+                        successfullyDeletedIds.add(listingId)
+
+                        // A 404 here means this is a stale cached listing that
+                        // was already removed from Discogs. Either way, remove
+                        // it from the Android results and backend cache.
+                        onListingDeleted(listingId)
+
+                        Log.d(
+                            "AI_BULK_DELETE",
+                            if (response.code() == 404) {
+                                "Listing $listingId was already gone from Discogs. Pruning stale cache."
+                            } else {
+                                "Deleted listing $listingId from Discogs"
+                            }
+                        )
+
+                    } else {
+                        failedCount++
+
+                        Log.e(
+                            "AI_BULK_DELETE",
+                            "Failed to delete listing $listingId. HTTP ${response.code()}"
+                        )
+                    }
+
+                } catch (e: Exception) {
+                    failedCount++
+
+                    Log.e(
+                        "AI_BULK_DELETE",
+                        "Network error deleting listing $listingId",
+                        e
+                    )
+                }
+            }
+
+            // Remove every successfully deleted listing from FastAPI's
+            // in-memory inventory cache AND inventory_cache.json.
+            if (successfullyDeletedIds.isNotEmpty()) {
+                try {
+                    val cacheResponse =
+                        BackendRetrofitClient.apiService.removeFromInventoryCache(
+                            RemoveInventoryCacheRequest(
+                                listingIds = successfullyDeletedIds
+                            )
+                        )
+
+                    Log.d(
+                        "AI_BULK_DELETE",
+                        "Backend cache removed ${cacheResponse.removed} listing(s). " +
+                                "${cacheResponse.cachedItems} cached listing(s) remain."
+                    )
+
+                } catch (cacheError: Exception) {
+                    Log.e(
+                        "AI_BULK_DELETE",
+                        "Discogs deletes succeeded, but backend inventory cache sync failed",
+                        cacheError
+                    )
+                }
+            }
+
+            // Keep the main application on AI Inventory Search.
+            _uiState.value = ReleaseUiState.AiSearch
+
+            onComplete(
+                successfullyDeletedIds.size,
+                failedCount
+            )
         }
     }
 
@@ -383,6 +567,120 @@ class ReleaseViewModel : ViewModel() {
                 _uiState.value = ReleaseUiState.Error(t.message ?: "Unknown network error")
             }
         })
+    }
+
+
+    fun loadOrderMessages(
+        orderId: String,
+        token: String
+    ) {
+        viewModelScope.launch {
+            _orderMessagesUiState.value =
+                OrderMessagesUiState.Loading
+
+            try {
+                val authHeader =
+                    "Discogs token=$token"
+
+                val firstPage =
+                    RetrofitClient.apiService
+                        .getOrderMessages(
+                            orderId = orderId,
+                            authHeader = authHeader,
+                            page = 1,
+                            perPage = 100
+                        )
+
+                val allMessages =
+                    firstPage.messages.toMutableList()
+
+                val totalPages =
+                    firstPage.pagination?.pages ?: 1
+
+                if (totalPages > 1) {
+                    for (page in 2..totalPages) {
+                        val response =
+                            RetrofitClient.apiService
+                                .getOrderMessages(
+                                    orderId = orderId,
+                                    authHeader = authHeader,
+                                    page = page,
+                                    perPage = 100
+                                )
+
+                        allMessages.addAll(
+                            response.messages
+                        )
+                    }
+                }
+
+                _orderMessagesUiState.value =
+                    OrderMessagesUiState.Success(
+                        messages = allMessages
+                    )
+
+            } catch (e: Exception) {
+                Log.e(
+                    "ORDER_MESSAGES",
+                    "Failed to load order messages",
+                    e
+                )
+
+                _orderMessagesUiState.value =
+                    OrderMessagesUiState.Error(
+                        e.localizedMessage
+                            ?: "Failed to load messages"
+                    )
+            }
+        }
+    }
+
+    fun sendOrderMessage(
+        orderId: String,
+        message: String,
+        token: String
+    ) {
+        val cleanMessage = message.trim()
+
+        if (cleanMessage.isEmpty()) {
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val authHeader =
+                    "Discogs token=$token"
+
+                RetrofitClient.apiService
+                    .sendOrderMessage(
+                        orderId = orderId,
+                        authHeader = authHeader,
+                        request = AddOrderMessageRequest(
+                            message = cleanMessage
+                        )
+                    )
+
+                // Reload the conversation so the new message
+                // appears exactly as Discogs stored it.
+                loadOrderMessages(
+                    orderId = orderId,
+                    token = token
+                )
+
+            } catch (e: Exception) {
+                Log.e(
+                    "ORDER_MESSAGES",
+                    "Failed to send order message",
+                    e
+                )
+
+                _orderMessagesUiState.value =
+                    OrderMessagesUiState.Error(
+                        e.localizedMessage
+                            ?: "Failed to send message"
+                    )
+            }
+        }
     }
 
     fun openRatings(username: String, ratingType: String) {

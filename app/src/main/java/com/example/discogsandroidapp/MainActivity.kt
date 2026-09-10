@@ -74,15 +74,29 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val uiState by viewModel.uiState.collectAsState()
                     val profileUiState by viewModel.profileUiState.collectAsState()
+                    val orderMessagesUiState by viewModel.orderMessagesUiState.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
+
+                    // AI search action state
+                    var aiListingToEdit by remember {
+                        mutableStateOf<AiInventoryResult?>(null)
+                    }
+
+                    // Lets the release-details Back button return to the AI search.
+                    var returnToAiSearch by remember {
+                        mutableStateOf(false)
+                    }
 
                     // "Smart Back" logic to prevent going all the way home
                     val performSmartBack = {
                         when (uiState) {
                             is ReleaseUiState.ReleaseSuccess -> {
-                                if (searchQuery.isNotEmpty()) {
+                                if (returnToAiSearch) {
+                                    returnToAiSearch = false
+                                    viewModel.navigateToAiSearch()
+                                } else if (searchQuery.isNotEmpty()) {
                                     viewModel.search(searchQuery, token) // Go back to search results
                                 } else {
                                     viewModel.resetToIdle() // Go home
@@ -92,6 +106,65 @@ class MainActivity : ComponentActivity() {
                                 viewModel.navigateToOrders(token) // Go back to order list
                             }
                             else -> viewModel.resetToIdle() // Default fallback
+                        }
+                    }
+
+                    // Reuse the existing edit-listing dialog for an AI search result.
+                    //
+                    // NOTE: AiInventoryResult does not currently include the original
+                    // Discogs listing comments, so comments start blank here. We will
+                    // add comments to the AI result model/backend next so edits can
+                    // preserve them safely.
+                    aiListingToEdit?.let { result ->
+                        val listingId = result.listingId
+
+                        if (listingId != null) {
+                            val listing = InventoryListing(
+                                id = listingId,
+                                status = "For Sale",
+                                condition = result.condition ?: "",
+                                sleeve_condition = result.sleeveCondition ?: "Not Graded",
+                                comments = result.comments,
+                                price = result.price?.let { price ->
+                                    Price(
+                                        value = price,
+                                        currency = result.currency ?: "USD"
+                                    )
+                                },
+                                release = ListingRelease(
+                                    id = result.releaseId,
+                                    description = "${result.artist} - ${result.title}",
+                                    thumbnail = result.thumbnail ?: "",
+                                    title = result.title,
+                                    artist = result.artist
+                                )
+                            )
+
+                            EditListingDialog(
+                                listing = listing,
+                                onDismiss = {
+                                    aiListingToEdit = null
+                                },
+                                onSave = {
+                                        price,
+                                        condition,
+                                        sleeveCondition,
+                                        comments ->
+
+                                    viewModel.editListing(
+                                        listingId = listingId,
+                                        price = price,
+                                        condition = condition,
+                                        sleeveCondition = sleeveCondition,
+                                        comments = comments,
+                                        token = token
+                                    )
+
+                                    aiListingToEdit = null
+                                }
+                            )
+                        } else {
+                            aiListingToEdit = null
                         }
                     }
 
@@ -226,12 +299,70 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.AiSearch -> {
                                         AiSearchScreen(
                                             viewModel = aiSearchViewModel,
+
                                             onBackClick = {
                                                 aiSearchViewModel.clearSearch()
                                                 viewModel.resetToIdle()
+                                            },
+
+                                            onReleaseClick = { releaseId ->
+                                                returnToAiSearch = true
+
+                                                viewModel.fetchRelease(
+                                                    releaseId = releaseId,
+                                                    token = token
+                                                )
+                                            },
+
+                                            onEditClick = { result ->
+                                                if (result.listingId != null) {
+                                                    aiListingToEdit = result
+                                                }
+                                            },
+
+                                            // Delete one record from the three-dot menu.
+                                            // Remove it from the visible AI results as soon
+                                            // as Discogs confirms that specific deletion.
+                                            onDeleteClick = { result ->
+                                                result.listingId?.let { listingId ->
+
+                                                    viewModel.deleteListingsFromAiSearch(
+                                                        listingIds = listOf(listingId),
+                                                        token = token,
+                                                        onListingDeleted = { deletedListingId ->
+                                                            aiSearchViewModel.removeListings(
+                                                                listOf(deletedListingId)
+                                                            )
+                                                        }
+                                                    )
+                                                }
+                                            },
+
+                                            // Delete every record selected by long-press.
+                                            // Each card disappears immediately after its
+                                            // individual Discogs DELETE succeeds.
+                                            onDeleteSelected = { selectedResults ->
+
+                                                val listingIds = selectedResults.mapNotNull { result ->
+                                                    result.listingId
+                                                }
+
+                                                if (listingIds.isNotEmpty()) {
+
+                                                    viewModel.deleteListingsFromAiSearch(
+                                                        listingIds = listingIds,
+                                                        token = token,
+                                                        onListingDeleted = { deletedListingId ->
+                                                            aiSearchViewModel.removeListings(
+                                                                listOf(deletedListingId)
+                                                            )
+                                                        }
+                                                    )
+                                                }
                                             }
                                         )
                                     }
+
                                     // THIS WAS THE MISSING BLOCK!
                                     is ReleaseUiState.Idle -> {
                                         when (val pState = profileUiState) {
@@ -427,7 +558,10 @@ class MainActivity : ComponentActivity() {
                                             OrdersScreen(
                                                 orders = state.orders,
                                                 onOrderClick = { selectedOrder ->
-                                                    viewModel.navigateToOrderDetails(selectedOrder)
+                                                    viewModel.navigateToOrderDetails(
+                                                        order = selectedOrder,
+                                                        token = token
+                                                    )
                                                 }
                                             )
                                         }
@@ -436,13 +570,34 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrderDetails -> {
                                         OrderDetailScreen(
                                             order = state.order,
-                                            onBackClick = { viewModel.resetToIdle() },
+                                            messageState = orderMessagesUiState,
+                                            onBackClick = {
+                                                viewModel.navigateToOrders(token)
+                                            },
                                             onStatusChange = { newStatus ->
                                                 state.order.id?.let { orderId ->
-                                                    viewModel.updateOrderStatus(orderId, newStatus, token)
+                                                    viewModel.updateOrderStatus(
+                                                        orderId,
+                                                        newStatus,
+                                                        token
+                                                    )
                                                 }
                                             },
-                                            onItemClick = { releaseId -> viewModel.fetchRelease(releaseId = releaseId.toLong(), token = token) }
+                                            onItemClick = { releaseId ->
+                                                viewModel.fetchRelease(
+                                                    releaseId = releaseId.toLong(),
+                                                    token = token
+                                                )
+                                            },
+                                            onSendMessage = { message ->
+                                                state.order.id?.let { orderId ->
+                                                    viewModel.sendOrderMessage(
+                                                        orderId = orderId,
+                                                        message = message,
+                                                        token = token
+                                                    )
+                                                }
+                                            }
                                         )
                                     }
 

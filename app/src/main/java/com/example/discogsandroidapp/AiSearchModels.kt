@@ -16,6 +16,7 @@ data class AiSearchResponse(
 
 @Serializable
 data class AiInventoryResult(
+    val comments: String = "",
     val listingId: Long? = null,
     val releaseId: Long,
     val artist: String,

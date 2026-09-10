@@ -70,6 +70,46 @@ class AiSearchViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Immediately removes deleted Discogs listings from the currently
+     * displayed AI search results without rerunning the search.
+     */
+    fun removeListings(listingIds: Collection<Long>) {
+        if (listingIds.isEmpty()) {
+            return
+        }
+
+        val currentState = _uiState.value
+
+        if (currentState !is AiSearchUiState.Success) {
+            return
+        }
+
+        val idsToRemove = listingIds.toSet()
+
+        val updatedResults =
+            currentState.response.results.filterNot { result ->
+                result.listingId != null &&
+                        result.listingId in idsToRemove
+            }
+
+        val removedCount =
+            currentState.response.results.size - updatedResults.size
+
+        if (removedCount == 0) {
+            return
+        }
+
+        val updatedResponse =
+            currentState.response.copy(
+                summary = "Found ${updatedResults.size} matching records.",
+                results = updatedResults
+            )
+
+        _uiState.value =
+            AiSearchUiState.Success(updatedResponse)
+    }
+
     fun clearSearch() {
         _query.value = ""
         _uiState.value = AiSearchUiState.Idle

@@ -14,9 +14,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,15 +33,46 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.TextButton
 
 @Composable
 fun AiSearchScreen(
     viewModel: AiSearchViewModel,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onReleaseClick: (Long) -> Unit = {},
+    onEditClick: (AiInventoryResult) -> Unit = {},
+    onDeleteClick: (AiInventoryResult) -> Unit = {},
+    onDeleteSelected: (List<AiInventoryResult>) -> Unit = {}
 ) {
     val query by viewModel.query.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
+
+    var selectedListingIds by remember {
+        mutableStateOf<Set<Long>>(emptySet())
+    }
+
+    val selectionMode = selectedListingIds.isNotEmpty()
+
+    fun toggleSelection(result: AiInventoryResult) {
+        val listingId = result.listingId ?: return
+
+        selectedListingIds =
+            if (listingId in selectedListingIds) {
+                selectedListingIds - listingId
+            } else {
+                selectedListingIds + listingId
+            }
+    }
 
     Column(
         modifier = Modifier
@@ -47,23 +80,65 @@ fun AiSearchScreen(
             .padding(16.dp)
     ) {
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-
-            IconButton(
-                onClick = onBackClick
+        if (selectionMode) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back"
+                TextButton(
+                    onClick = {
+                        selectedListingIds = emptySet()
+                    }
+                ) {
+                    Text("Cancel")
+                }
+
+                TextButton(
+                    onClick = {
+                        val currentResults =
+                            (uiState as? AiSearchUiState.Success)
+                                ?.response
+                                ?.results
+                                .orEmpty()
+
+                        val selectedResults =
+                            currentResults.filter { result ->
+                                result.listingId in selectedListingIds
+                            }
+
+                        if (selectedResults.isNotEmpty()) {
+                            onDeleteSelected(selectedResults)
+                        }
+
+                        selectedListingIds = emptySet()
+                    }
+                ) {
+                    Text(
+                        text = "Delete (${selectedListingIds.size})",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+
+                IconButton(
+                    onClick = onBackClick
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back"
+                    )
+                }
+
+                Text(
+                    text = "AI Inventory Search",
+                    style = MaterialTheme.typography.headlineMedium
                 )
             }
-
-            Text(
-                text = "AI Inventory Search",
-                style = MaterialTheme.typography.headlineMedium
-            )
         }
 
         Spacer(
@@ -140,7 +215,13 @@ fun AiSearchScreen(
 
             is AiSearchUiState.Success -> {
                 AiSearchResults(
-                    response = state.response
+                    response = state.response,
+                    selectedListingIds = selectedListingIds,
+                    selectionMode = selectionMode,
+                    onToggleSelection = ::toggleSelection,
+                    onReleaseClick = onReleaseClick,
+                    onEditClick = onEditClick,
+                    onDeleteClick = onDeleteClick
                 )
             }
 
@@ -192,9 +273,16 @@ private fun AiSearchSuggestions(
     }
 }
 
+
 @Composable
 private fun AiSearchResults(
-    response: AiSearchResponse
+    response: AiSearchResponse,
+    selectedListingIds: Set<Long>,
+    selectionMode: Boolean,
+    onToggleSelection: (AiInventoryResult) -> Unit,
+    onReleaseClick: (Long) -> Unit,
+    onEditClick: (AiInventoryResult) -> Unit,
+    onDeleteClick: (AiInventoryResult) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize()
@@ -232,19 +320,67 @@ private fun AiSearchResults(
             ) { result ->
 
                 AiInventoryResultCard(
-                    result = result
+                    result = result,
+                    isSelected = result.listingId in selectedListingIds,
+                    selectionMode = selectionMode,
+                    onToggleSelection = onToggleSelection,
+                    onReleaseClick = onReleaseClick,
+                    onEditClick = onEditClick,
+                    onDeleteClick = onDeleteClick
                 )
             }
         }
     }
 }
 
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AiInventoryResultCard(
-    result: AiInventoryResult
+    result: AiInventoryResult,
+    isSelected: Boolean,
+    selectionMode: Boolean,
+    onToggleSelection: (AiInventoryResult) -> Unit,
+    onReleaseClick: (Long) -> Unit,
+    onEditClick: (AiInventoryResult) -> Unit,
+    onDeleteClick: (AiInventoryResult) -> Unit
 ) {
+    var menuExpanded by remember {
+        mutableStateOf(false)
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = {
+                    if (selectionMode) {
+                        onToggleSelection(result)
+                    } else {
+                        onReleaseClick(result.releaseId)
+                    }
+                },
+                onLongClick = {
+                    onToggleSelection(result)
+                }
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor =
+                if (isSelected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surface
+                }
+        ),
+        border =
+            if (isSelected) {
+                BorderStroke(
+                    width = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            } else {
+                null
+            }
     ) {
 
         Row(
@@ -307,37 +443,49 @@ private fun AiInventoryResultCard(
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
+            }
 
-                result.marketValue?.let { marketValue ->
+            if (!selectionMode) {
+                Column {
 
-                    Text(
-                        text = "Market value: %.2f".format(
-                            marketValue
-                        ),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
+                    IconButton(
+                        onClick = {
+                            menuExpanded = true
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Listing options"
+                        )
+                    }
 
-                result.recommendedPrice?.let { recommendedPrice ->
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = {
+                            menuExpanded = false
+                        }
+                    ) {
 
-                    Text(
-                        text = "Suggested price: %.2f".format(
-                            recommendedPrice
-                        ),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
+                        DropdownMenuItem(
+                            text = {
+                                Text("Edit")
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onEditClick(result)
+                            }
+                        )
 
-                result.reason?.let { reason ->
-
-                    Spacer(
-                        modifier = Modifier.height(4.dp)
-                    )
-
-                    Text(
-                        text = reason,
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Delete")
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteClick(result)
+                            }
+                        )
+                    }
                 }
             }
         }

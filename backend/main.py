@@ -1,18 +1,19 @@
 import asyncio
 import httpx
-from agent_service import (
-    create_inventory_agent,
-    run_inventory_agent
-)
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from agent_service import run_inventory_agent
 import sys
 from pathlib import Path
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
 from agents.mcp import (
     MCPServerManager,
     MCPServerStdio
+)
+
+from agent_service import (
+    create_inventory_agent,
+    run_inventory_agent
 )
 
 from inventory_cache import (
@@ -20,7 +21,7 @@ from inventory_cache import (
     get_cache_count,
     get_release_ids,
     refresh_cache,
-    search_inventory
+    remove_listings_from_cache
 )
 
 from release_metadata_cache import (
@@ -29,7 +30,9 @@ from release_metadata_cache import (
     sync_missing_release_metadata
 )
 
+
 BACKEND_DIR = Path(__file__).resolve().parent
+
 
 async def background_inventory_refresh():
     while True:
@@ -70,6 +73,44 @@ async def background_inventory_refresh():
             )
 
         await asyncio.sleep(300)
+
+
+async def background_release_metadata_refresh():
+    while True:
+        try:
+            release_ids = get_release_ids()
+
+            added = (
+                await sync_missing_release_metadata(
+                    release_ids,
+                    limit=30
+                )
+            )
+
+            if added > 0:
+                print(
+                    f"Added metadata for "
+                    f"{added} releases."
+                )
+
+                # Keep working through the
+                # missing releases.
+                await asyncio.sleep(2)
+
+            else:
+                # Everything is currently cached.
+                await asyncio.sleep(300)
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as error:
+            print(
+                f"Release metadata refresh "
+                f"failed: {error}"
+            )
+
+            await asyncio.sleep(60)
 
 
 @asynccontextmanager
@@ -156,6 +197,10 @@ class AiSearchRequest(BaseModel):
     query: str
 
 
+class RemoveInventoryCacheRequest(BaseModel):
+    listingIds: list[int]
+
+
 @app.get("/")
 def root():
     return {
@@ -187,6 +232,33 @@ async def sync_inventory():
                 f"Discogs API error: "
                 f"{error.response.status_code}"
             )
+        )
+
+
+@app.post("/api/inventory-cache/remove")
+def remove_inventory_cache(
+    cache_request: RemoveInventoryCacheRequest
+):
+    try:
+        removed = remove_listings_from_cache(
+            cache_request.listingIds
+        )
+
+        return {
+            "status": "success",
+            "removed": removed,
+            "cachedItems": get_cache_count()
+        }
+
+    except Exception as error:
+        print(
+            "Failed to remove listings from "
+            f"inventory cache: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
         )
 
 
@@ -243,42 +315,6 @@ async def ai_search(
             detail=str(error)
         )
 
-async def background_release_metadata_refresh():
-    while True:
-        try:
-            release_ids = get_release_ids()
-
-            added = (
-                await sync_missing_release_metadata(
-                    release_ids,
-                    limit=30
-                )
-            )
-
-            if added > 0:
-                print(
-                    f"Added metadata for "
-                    f"{added} releases."
-                )
-
-                # Keep working through the
-                # missing releases.
-                await asyncio.sleep(2)
-
-            else:
-                # Everything is currently cached.
-                await asyncio.sleep(300)
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as error:
-            print(
-                f"Release metadata refresh "
-                f"failed: {error}"
-            )
-
-            await asyncio.sleep(60)
 
 @app.get("/api/metadata-status")
 def metadata_status():
