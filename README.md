@@ -6,7 +6,7 @@ The project focuses on reducing the number of taps, screens, and repeated action
 
 
 
-https://github.com/user-attachments/assets/9ebdde79-c62a-4003-9a32-dfba41f2141e
+https://github.com/user-attachments/assets/00e50224-6f42-4db7-a1af-812638713d5d
 
 
 
