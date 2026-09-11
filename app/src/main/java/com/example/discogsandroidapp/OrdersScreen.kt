@@ -16,6 +16,9 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun OrdersScreen(
     orders: List<DiscogsOrder>,
+    isFetchingMore: Boolean = false,
+    hasMore: Boolean = false,
+    onLoadMore: () -> Unit = {},
     onOrderClick: (DiscogsOrder) -> Unit = {}
 ) {
     if (orders.isEmpty()) {
@@ -127,5 +130,30 @@ fun OrdersScreen(
                 }
             }
         }
+
+        if (hasMore || isFetchingMore) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isFetchingMore) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(28.dp),
+                            strokeWidth = 3.dp
+                        )
+                    } else {
+                        OutlinedButton(
+                            onClick = onLoadMore
+                        ) {
+                            Text("Load more orders")
+                        }
+                    }
+                }
+            }
+        }
+
     }
 }

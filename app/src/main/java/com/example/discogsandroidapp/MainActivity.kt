@@ -3,7 +3,11 @@ package com.example.discogsandroidapp
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,6 +19,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -43,6 +49,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -55,6 +62,7 @@ import androidx.compose.material.icons.filled.FilterList
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.material.icons.filled.AutoAwesome
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,13 +79,24 @@ class MainActivity : ComponentActivity() {
             }
 
             DiscogsAndroidAppTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                val snackbarHostState = remember { SnackbarHostState() }
+                val appScope = rememberCoroutineScope()
+
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    snackbarHost = { SnackbarHost(snackbarHostState) }
+                ) { innerPadding ->
                     val uiState by viewModel.uiState.collectAsState()
                     val profileUiState by viewModel.profileUiState.collectAsState()
                     val orderMessagesUiState by viewModel.orderMessagesUiState.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
+                    var marketplacePriceSummary by remember {
+                        mutableStateOf<ReleasePriceSummary?>(null)
+                    }
+                    var barcodeSearchPending by remember { mutableStateOf(false) }
+                    var showBarcodeNoResults by remember { mutableStateOf(false) }
 
                     // AI search action state
                     var aiListingToEdit by remember {
@@ -89,23 +108,116 @@ class MainActivity : ComponentActivity() {
                         mutableStateOf(false)
                     }
 
+                    // Lets the release-details Back button return to My Store
+                    // when a release was opened from an inventory listing.
+                    var returnToStore by remember {
+                        mutableStateOf(false)
+                    }
+
+                    LaunchedEffect(uiState, barcodeSearchPending) {
+                        if (!barcodeSearchPending) return@LaunchedEffect
+
+                        when (val currentState = uiState) {
+                            is ReleaseUiState.SearchSuccess -> {
+                                barcodeSearchPending = false
+                                if (currentState.results.isEmpty()) {
+                                    showBarcodeNoResults = true
+                                }
+                            }
+
+                            is ReleaseUiState.StoreSuccess -> {
+                                barcodeSearchPending = false
+                                if (currentState.listings.isEmpty()) {
+                                    showBarcodeNoResults = true
+                                }
+                            }
+
+                            is ReleaseUiState.Error -> {
+                                barcodeSearchPending = false
+                            }
+
+                            else -> Unit
+                        }
+                    }
+
                     // "Smart Back" logic to prevent going all the way home
                     val performSmartBack = {
                         when (uiState) {
                             is ReleaseUiState.ReleaseSuccess -> {
-                                if (returnToAiSearch) {
-                                    returnToAiSearch = false
-                                    viewModel.navigateToAiSearch()
-                                } else if (searchQuery.isNotEmpty()) {
-                                    viewModel.search(searchQuery, token) // Go back to search results
-                                } else {
-                                    viewModel.resetToIdle() // Go home
+                                when {
+                                    returnToStore -> {
+                                        returnToStore = false
+                                        viewModel.fetchStoreInventory(token)
+                                    }
+
+                                    returnToAiSearch -> {
+                                        returnToAiSearch = false
+                                        viewModel.navigateToAiSearch()
+                                    }
+
+                                    searchQuery.isNotEmpty() -> {
+                                        viewModel.search(searchQuery, token) // Go back to search results
+                                    }
+
+                                    else -> {
+                                        viewModel.resetToIdle() // Go home
+                                    }
                                 }
                             }
                             is ReleaseUiState.OrderDetails -> {
                                 viewModel.navigateToOrders(token) // Go back to order list
                             }
                             else -> viewModel.resetToIdle() // Default fallback
+                        }
+                    }
+
+                    /*
+                     * Handle Android's system Back action, including the
+                     * left/right edge swipe gesture.
+                     *
+                     * Do not intercept Back on the dashboard (Idle). That
+                     * lets Android close/minimize the app normally when the
+                     * user is already at the root screen.
+                     *
+                     * Dialogs keep their own normal Back-to-dismiss behavior.
+                     */
+                    BackHandler(
+                        enabled =
+                            marketplaceReleaseId != null ||
+                                    uiState !is ReleaseUiState.Idle
+                    ) {
+                        when {
+                            // Marketplace listings are an overlay on top of
+                            // the current release, so close the overlay first.
+                            marketplaceReleaseId != null -> {
+                                marketplaceReleaseId = null
+                            }
+
+                            // AI search has its own local search state.
+                            uiState is ReleaseUiState.AiSearch -> {
+                                aiSearchViewModel.clearSearch()
+                                viewModel.resetToIdle()
+                            }
+
+                            // Master versions must return to the release that
+                            // opened the versions screen.
+                            uiState is ReleaseUiState.MasterVersionsLoading ||
+                                    uiState is ReleaseUiState.MasterVersionsSuccess ||
+                                    uiState is ReleaseUiState.MasterVersionsError -> {
+                                viewModel.returnFromMasterVersions()
+                            }
+
+                            // Order detail returns to the order list.
+                            uiState is ReleaseUiState.OrderDetails -> {
+                                viewModel.navigateToOrders(token)
+                            }
+
+                            // Release details, store, search results, ratings,
+                            // orders, inventory, offers, loading/error screens,
+                            // etc. use the app's existing Smart Back behavior.
+                            else -> {
+                                performSmartBack()
+                            }
                         }
                     }
 
@@ -157,7 +269,30 @@ class MainActivity : ComponentActivity() {
                                         condition = condition,
                                         sleeveCondition = sleeveCondition,
                                         comments = comments,
-                                        token = token
+                                        token = token,
+                                        refreshStoreAfterSuccess = false,
+                                        waitForAiCacheSync = true,
+                                        onAiCacheSyncResult = { cacheSynced ->
+                                            if (cacheSynced) {
+                                                // Re-run the exact query that produced
+                                                // these results, not whatever partial
+                                                // text may now be in the search field.
+                                                aiSearchViewModel
+                                                    .rerunLastResultQuery()
+                                            } else {
+                                                // The Discogs edit succeeded, but the
+                                                // optional AI cache did not. Do not
+                                                // immediately rerun against stale data.
+                                                appScope.launch {
+                                                    snackbarHostState.showSnackbar(
+                                                        message =
+                                                            "Listing updated, but AI cache sync failed. " +
+                                                                    "AI results may be stale until the next sync."
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onSuccess = {}
                                     )
 
                                     aiListingToEdit = null
@@ -168,13 +303,34 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    if (showBarcodeNoResults) {
+                        AlertDialog(
+                            onDismissRequest = { showBarcodeNoResults = false },
+                            title = { Text("No results found") },
+                            text = {
+                                Text("No Discogs results were found for that barcode.")
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = { showBarcodeNoResults = false }
+                                ) {
+                                    Text("OK")
+                                }
+                            }
+                        )
+                    }
+
                     // If a user clicked "View Listings", overlay the Marketplace screen!
                     if (marketplaceReleaseId != null) {
                         MarketplaceListingsScreen(
                             releaseId = marketplaceReleaseId!!,
+                            priceSummary = marketplacePriceSummary,
                             viewModel = viewModel,
                             token = token,
-                            onBackClick = { marketplaceReleaseId = null }
+                            onBackClick = {
+                                marketplaceReleaseId = null
+                                marketplacePriceSummary = null
+                            }
                         )
                     } else {
                         // STANDARD APP CONTENT
@@ -186,6 +342,7 @@ class MainActivity : ComponentActivity() {
                             // 1. ALWAYS VISIBLE Search Bar Header
                             val context = LocalContext.current
                             val keyboardController = LocalSoftwareKeyboardController.current
+                            val searchFocusRequester = remember { FocusRequester() }
                             val scanner = remember { GmsBarcodeScanning.getClient(context) }
                             if (uiState !is ReleaseUiState.AiSearch) {
                                 Row(
@@ -217,27 +374,44 @@ class MainActivity : ComponentActivity() {
 
                                     OutlinedTextField(
                                         value = searchQuery,
-                                        onValueChange = {
-                                            searchQuery = it
-                                        },
+                                        onValueChange = { searchQuery = it },
                                         label = {
                                             Text(
-                                                "Search...",
+                                                if (
+                                                    uiState is ReleaseUiState.StoreSuccess ||
+                                                    uiState is ReleaseUiState.StoreLoading
+                                                ) {
+                                                    "Search My Store..."
+                                                } else {
+                                                    "Search..."
+                                                },
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         },
-                                        modifier = Modifier.weight(1f),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .focusRequester(searchFocusRequester),
                                         singleLine = true,
                                         keyboardOptions = KeyboardOptions(
                                             imeAction = ImeAction.Search
                                         ),
                                         keyboardActions = KeyboardActions(
                                             onSearch = {
-                                                viewModel.search(
-                                                    searchQuery,
-                                                    token
-                                                )
+                                                if (
+                                                    uiState is ReleaseUiState.StoreSuccess ||
+                                                    uiState is ReleaseUiState.StoreLoading
+                                                ) {
+                                                    viewModel.searchStoreInventory(
+                                                        query = searchQuery,
+                                                        token = token
+                                                    )
+                                                } else {
+                                                    viewModel.search(
+                                                        searchQuery,
+                                                        token
+                                                    )
+                                                }
                                                 keyboardController?.hide()
                                             }
                                         ),
@@ -246,6 +420,19 @@ class MainActivity : ComponentActivity() {
                                                 IconButton(
                                                     onClick = {
                                                         searchQuery = ""
+
+                                                        if (
+                                                            uiState is ReleaseUiState.StoreSuccess ||
+                                                            uiState is ReleaseUiState.StoreLoading
+                                                        ) {
+                                                            viewModel.clearStoreSearch(token)
+                                                        }
+
+                                                        searchFocusRequester.requestFocus()
+                                                        appScope.launch {
+                                                            kotlinx.coroutines.delay(80)
+                                                            keyboardController?.show()
+                                                        }
                                                     }
                                                 ) {
                                                     Icon(
@@ -268,11 +455,22 @@ class MainActivity : ComponentActivity() {
                                                     barcode.rawValue?.let { scannedValue ->
 
                                                         searchQuery = scannedValue
+                                                        barcodeSearchPending = true
 
-                                                        viewModel.search(
-                                                            scannedValue,
-                                                            token
-                                                        )
+                                                        if (
+                                                            uiState is ReleaseUiState.StoreSuccess ||
+                                                            uiState is ReleaseUiState.StoreLoading
+                                                        ) {
+                                                            viewModel.searchStoreInventory(
+                                                                query = scannedValue,
+                                                                token = token
+                                                            )
+                                                        } else {
+                                                            viewModel.search(
+                                                                scannedValue,
+                                                                token
+                                                            )
+                                                        }
 
                                                         keyboardController?.hide()
                                                     }
@@ -372,7 +570,8 @@ class MainActivity : ComponentActivity() {
                                                     profile = pState.profile,
 
                                                     onStoreClick = {
-                                                        viewModel.fetchStoreInventory(token)
+                                                        searchQuery = ""
+                                                        viewModel.clearStoreSearch(token)
                                                     },
 
                                                     onAiSearchClick = {
@@ -434,11 +633,27 @@ class MainActivity : ComponentActivity() {
                                             viewModel.fetchStoreInventory(token, sortField, sortOrder, reset = true)
                                         },
                                         onLoadMore = { viewModel.loadNextPage(token) },
-                                        onDeleteListing = { listingId -> viewModel.deleteListing(listingId, token) },
+                                        onDeleteListing = { listingId ->
+                                            viewModel.deleteListing(listingId, token)
+                                        },
+                                        onDeleteSelected = { listingIds ->
+                                            viewModel.deleteListingsFromStore(
+                                                listingIds = listingIds,
+                                                token = token
+                                            )
+                                        },
                                         onEditListing = { id, price, condition, sleeveCondition, comments ->
                                             viewModel.editListing(id, price, condition, sleeveCondition, comments, token)
                                         },
-                                        onListingClick = { /* ... */ }
+                                        onListingClick = { listing ->
+                                            returnToStore = true
+                                            returnToAiSearch = false
+                                            searchQuery = ""
+                                            viewModel.fetchRelease(
+                                                releaseId = listing.release.id,
+                                                token = token
+                                            )
+                                        }
                                     )
 
                                     is ReleaseUiState.Loading -> CircularProgressIndicator()
@@ -485,11 +700,16 @@ class MainActivity : ComponentActivity() {
                                                     comments = comments,
                                                     token = token,
                                                     onSuccess = {
-                                                        // show toast here
+                                                        appScope.launch {
+                                                            snackbarHostState.showSnackbar(
+                                                                message = "Successfully listed"
+                                                            )
+                                                        }
                                                     }
                                                 )
                                             },
                                             onViewListingsClick = { releaseId ->
+                                                marketplacePriceSummary = state.priceSummary
                                                 marketplaceReleaseId = releaseId
                                             },
 
@@ -559,7 +779,14 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrdersSuccess -> {
                                         var selectedStatus by remember { mutableStateOf("Payment Received") }
                                         var filterExpanded by remember { mutableStateOf(false) }
-                                        val orderStatuses = listOf("Payment Received", "Invoice Sent", "In Progress", "Cancelled", "Shipped")
+                                        val orderStatuses = listOf(
+                                            "Payment Received",
+                                            "In Progress",
+                                            "Invoice Sent",
+                                            "Shipped",
+                                            "Cancelled",
+                                            "All Orders"
+                                        )
 
                                         Column(modifier = Modifier.fillMaxSize()) {
                                             Row(
@@ -570,7 +797,12 @@ class MainActivity : ComponentActivity() {
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Text(
-                                                    text = "My Orders (${state.orders.size})",
+                                                    text =
+                                                        if (state.totalItems > state.orders.size) {
+                                                            "My Orders (${state.orders.size}/${state.totalItems})"
+                                                        } else {
+                                                            "My Orders (${state.orders.size})"
+                                                        },
                                                     fontSize = 20.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -605,6 +837,13 @@ class MainActivity : ComponentActivity() {
 
                                             OrdersScreen(
                                                 orders = state.orders,
+                                                isFetchingMore = state.isFetchingMore,
+                                                hasMore = state.hasMore,
+                                                onLoadMore = {
+                                                    viewModel.loadNextOrdersPage(
+                                                        token
+                                                    )
+                                                },
                                                 onOrderClick = { selectedOrder ->
                                                     viewModel.navigateToOrderDetails(
                                                         order = selectedOrder,
@@ -966,19 +1205,38 @@ fun StoreScreen(
     onSortChanged: (sort: String, sortOrder: String) -> Unit,
     onLoadMore: () -> Unit,
     onDeleteListing: (Long) -> Unit,
+    onDeleteSelected: (List<Long>) -> Unit,
     onEditListing: (Long, Double, String, String, String) -> Unit,
     onListingClick: (InventoryListing) -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
     var listingToEdit by remember { mutableStateOf<InventoryListing?>(null) }
     var listingToView by remember { mutableStateOf<InventoryListing?>(null) }
+    var selectedListingIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+
+    val selectionMode = selectedListingIds.isNotEmpty()
+
+    fun toggleSelection(listingId: Long) {
+        selectedListingIds =
+            if (listingId in selectedListingIds) {
+                selectedListingIds - listingId
+            } else {
+                selectedListingIds + listingId
+            }
+    }
 
     listingToEdit?.let { listing ->
         EditListingDialog(
             listing = listing,
             onDismiss = { listingToEdit = null },
             onSave = { price, condition, sleeveCondition, comments ->
-                onEditListing(listing.id, price, condition, sleeveCondition, comments)
+                onEditListing(
+                    listing.id,
+                    price,
+                    condition,
+                    sleeveCondition,
+                    comments
+                )
                 listingToEdit = null
             }
         )
@@ -991,30 +1249,44 @@ fun StoreScreen(
             onEditClick = {
                 listingToView = null
                 listingToEdit = listing
+            },
+            onViewClick = {
+                listingToView = null
+                onListingClick(listing)
             }
         )
     }
 
-    if (listings.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Your store is currently empty.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
-    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (selectionMode) {
+                TextButton(
+                    onClick = { selectedListingIds = emptySet() }
+                ) {
+                    Text("Cancel")
+                }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp, start = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+                TextButton(
+                    onClick = {
+                        val ids = selectedListingIds.toList()
+                        if (ids.isNotEmpty()) {
+                            onDeleteSelected(ids)
+                        }
+                        selectedListingIds = emptySet()
+                    }
+                ) {
+                    Text(
+                        text = "Delete (${selectedListingIds.size})",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            } else {
                 Text(
                     text = "My Store ($totalItems Items)",
                     fontSize = 20.sp,
@@ -1023,7 +1295,10 @@ fun StoreScreen(
 
                 Box {
                     IconButton(onClick = { expanded = true }) {
-                        Icon(imageVector = Icons.Default.Sort, contentDescription = "Sort Options")
+                        Icon(
+                            imageVector = Icons.Default.Sort,
+                            contentDescription = "Sort Options"
+                        )
                     }
 
                     DropdownMenu(
@@ -1043,25 +1318,78 @@ fun StoreScreen(
             }
         }
 
-        itemsIndexed(listings) { index, listing ->
-            if (index == listings.lastIndex) {
-                LaunchedEffect(Unit) { onLoadMore() }
+        if (listings.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "No inventory results found.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = 16.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                itemsIndexed(
+                    items = listings,
+                    key = { _, listing -> listing.id }
+                ) { index, listing ->
+                    if (index == listings.lastIndex && !selectionMode) {
+                        LaunchedEffect(listing.id) { onLoadMore() }
+                    }
 
-            InventoryItemCard(
-                listing = listing,
-                onClick = { listingToView = listing },
-                onEditClick = { listingToEdit = listing },
-                onDeleteClick = { onDeleteListing(listing.id) }
-            )
+                    val isSelected = listing.id in selectedListingIds
+
+                    InventoryItemCard(
+                        listing = listing,
+                        isSelected = isSelected,
+                        selectionMode = selectionMode,
+                        onClick = {
+                            if (selectionMode) {
+                                toggleSelection(listing.id)
+                            } else {
+                                listingToView = listing
+                            }
+                        },
+                        onLongClick = { toggleSelection(listing.id) },
+                        onEditClick = { listingToEdit = listing },
+                        onDeleteClick = { onDeleteListing(listing.id) }
+                    )
+                }
+
+                if (isFetchingMore) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun InventoryItemCard(
     listing: InventoryListing,
+    isSelected: Boolean = false,
+    selectionMode: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
@@ -1070,70 +1398,135 @@ fun InventoryItemCard(
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() },
+            .then(
+                if (isSelected) {
+                    Modifier.border(
+                        width = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                } else {
+                    Modifier
+                }
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.elevatedCardColors(
+            containerColor =
+                if (isSelected) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                }
+        )
     ) {
         Row(
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             AsyncImage(
-                model = listing.release.thumbnail.takeIf { it.isNotBlank() } ?: "https://via.placeholder.com/150",
+                model = listing.release.thumbnail.takeIf { it.isNotBlank() }
+                    ?: "https://via.placeholder.com/150",
                 contentDescription = "Cover",
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(72.dp).clip(RoundedCornerShape(8.dp))
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(RoundedCornerShape(8.dp))
             )
 
             Spacer(modifier = Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = listing.release.description, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = listing.release.description,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
 
-                Surface(modifier = Modifier.padding(vertical = 4.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                    Text(text = listing.status.uppercase(), modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Surface(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Text(
+                        text = listing.status.uppercase(),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val priceText = listing.price?.let {
-                        String.format(java.util.Locale.getDefault(), "%s %.2f", it.currency, it.value)
+                        String.format(
+                            java.util.Locale.getDefault(),
+                            "%s %.2f",
+                            it.currency,
+                            it.value
+                        )
                     } ?: "N/A"
 
-                    Text(text = priceText, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = priceText,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
 
                     Spacer(modifier = Modifier.width(8.dp))
 
                     val media = getShortGrade(listing.condition)
                     val sleeve = getShortGrade(listing.sleeve_condition)
-                    val gradeText = if (sleeve == "Not Graded") media else "$media / $sleeve"
+                    val gradeText =
+                        if (sleeve == "Not Graded") media else "$media / $sleeve"
 
-                    Text(text = "• $gradeText", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "• $gradeText",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            Box {
-                IconButton(onClick = { menuExpanded = true }) {
-                    Icon(imageVector = Icons.Default.MoreVert, contentDescription = "Item Options")
-                }
+            if (!selectionMode) {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Item Options"
+                        )
+                    }
 
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Edit Listing") },
-                        onClick = {
-                            menuExpanded = false
-                            onEditClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Delete Listing", color = MaterialTheme.colorScheme.error) },
-                        onClick = {
-                            menuExpanded = false
-                            onDeleteClick()
-                        }
-                    )
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Edit Listing") },
+                            onClick = {
+                                menuExpanded = false
+                                onEditClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "Delete Listing",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteClick()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1148,12 +1541,25 @@ fun EditListingDialog(
     onSave: (price: Double, condition: String, sleeveCondition: String, comments: String) -> Unit
 ) {
     var price by remember { mutableStateOf(listing.price?.value?.toString() ?: "") }
+    var priceError by remember { mutableStateOf<String?>(null) }
     var condition by remember { mutableStateOf(listing.condition) }
     var sleeveCondition by remember { mutableStateOf(listing.sleeve_condition) }
     var comments by remember { mutableStateOf(listing.comments) }
 
     val conditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)")
-    val sleeveConditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Generic", "Not Graded", "No Cover")
+    val sleeveConditions = listOf(
+        "Mint (M)",
+        "Near Mint (NM or M-)",
+        "Very Good Plus (VG+)",
+        "Very Good (VG)",
+        "Good Plus (G+)",
+        "Good (G)",
+        "Fair (F)",
+        "Poor (P)",
+        "Not Graded",
+        "No Cover",
+        "Generic"
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1164,9 +1570,22 @@ fun EditListingDialog(
                 // 1. Price Field
                 OutlinedTextField(
                     value = price,
-                    onValueChange = { price = it },
+                    onValueChange = {
+                        price = it
+                        priceError = null
+                    },
                     label = { Text("Price (USD)") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal
+                    ),
+                    isError = priceError != null,
+                    supportingText =
+                        priceError?.let { message ->
+                            {
+                                Text(message)
+                            }
+                        },
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -1241,10 +1660,35 @@ fun EditListingDialog(
             }
         },
         confirmButton = {
-            Button(onClick = {
-                val parsedPrice = price.toDoubleOrNull() ?: 0.0
-                onSave(parsedPrice, condition, sleeveCondition, comments)
-            }) { Text("Save Changes") }
+            Button(
+                onClick = {
+                    val cleanPrice = price.trim()
+                    val parsedPrice = cleanPrice.toDoubleOrNull()
+                    val hasValidPrecision =
+                        Regex("^\\d+(\\.\\d{1,2})?$")
+                            .matches(cleanPrice)
+
+                    if (
+                        parsedPrice == null ||
+                        !parsedPrice.isFinite() ||
+                        parsedPrice <= 0.0 ||
+                        !hasValidPrecision
+                    ) {
+                        priceError =
+                            "Enter a valid price greater than $0.00 with up to 2 decimals."
+                    } else {
+                        priceError = null
+                        onSave(
+                            parsedPrice,
+                            condition,
+                            sleeveCondition,
+                            comments
+                        )
+                    }
+                }
+            ) {
+                Text("Save Changes")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
@@ -1270,7 +1714,8 @@ fun getShortGrade(grade: String): String {
 fun ListingDetailsDialog(
     listing: InventoryListing,
     onDismiss: () -> Unit,
-    onEditClick: () -> Unit
+    onEditClick: () -> Unit,
+    onViewClick: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1334,10 +1779,10 @@ fun ListingDetailsDialog(
                             Text("Edit")
                         }
                         Button(
-                            onClick = onDismiss,
+                            onClick = onViewClick,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Close")
+                            Text("View")
                         }
                     }
                 }

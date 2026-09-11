@@ -95,7 +95,11 @@ data class ReleasePriceSummary(
     val lastSold: String? = null,
     val numForSale: Int = 0,
     val lowestAskingPrice: Double? = null,
-    val priceSuggestions: PriceSuggestions? = null
+    val priceSuggestions: PriceSuggestions? = null,
+    val activeNearMintPrice: Double? = null,
+    val activeNearMintPremiumSleevePrice: Double? = null,
+    val activeMintPrice: Double? = null,
+    val activeMintSleevePrice: Double? = null
 ) {
     /**
      * Seller-focused asking-price recommendation.
@@ -163,37 +167,54 @@ data class ReleasePriceSummary(
                 }
 
                 "Near Mint (NM or M-)" -> {
+                    val activeMarketPrice =
+                        if (
+                            sleeveCondition == "Near Mint (NM or M-)" ||
+                            sleeveCondition == "Mint (M)"
+                        ) {
+                            activeNearMintPremiumSleevePrice
+                                ?: activeNearMintPrice
+                        } else {
+                            activeNearMintPrice
+                        }
+
+                    if (activeMarketPrice != null && activeMarketPrice > 0.0) {
+                        return roundPrice(activeMarketPrice)
+                    }
+
                     val multiplier =
                         if (
-                            sleeveCondition ==
-                            "Near Mint (NM or M-)" ||
-                            sleeveCondition ==
-                            "Mint (M)"
+                            sleeveCondition == "Near Mint (NM or M-)" ||
+                            sleeveCondition == "Mint (M)"
                         ) {
                             2.5
                         } else {
                             2.0
                         }
 
-                    return roundPrice(
-                        vgPlusAnchor * multiplier
-                    )
+                    return roundPrice(vgPlusAnchor * multiplier)
                 }
 
                 "Mint (M)" -> {
+                    val activeMarketPrice =
+                        if (sleeveCondition == "Mint (M)") {
+                            activeMintSleevePrice ?: activeMintPrice
+                        } else {
+                            activeMintPrice
+                        }
+
+                    if (activeMarketPrice != null && activeMarketPrice > 0.0) {
+                        return roundPrice(activeMarketPrice)
+                    }
+
                     val multiplier =
-                        if (
-                            sleeveCondition ==
-                            "Mint (M)"
-                        ) {
+                        if (sleeveCondition == "Mint (M)") {
                             5.0
                         } else {
                             4.0
                         }
 
-                    return roundPrice(
-                        vgPlusAnchor * multiplier
-                    )
+                    return roundPrice(vgPlusAnchor * multiplier)
                 }
             }
         }
@@ -625,9 +646,25 @@ data class DiscogsOrder(
     val id: String? = null,
     val status: String? = null,
     val created: String? = null,
-    val last_activity: String? = null,
+
+    @SerialName("last_activity")
+    val lastActivity: String? = null,
+
+    @SerialName("next_status")
+    val nextStatus: List<String>? = emptyList(),
+
     val buyer: BuyerInfo? = null,
+
+    val fee: OrderPrice? = null,
+    val shipping: OrderPrice? = null,
     val total: OrderPrice? = null,
+
+    @SerialName("shipping_address")
+    val shippingAddress: String? = null,
+
+    @SerialName("additional_instructions")
+    val additionalInstructions: String? = null,
+
     val items: List<OrderItem>? = emptyList()
 )
 
@@ -640,7 +677,8 @@ data class BuyerInfo(
 @Serializable
 data class OrderPrice(
     val value: Double? = null,
-    val currency: String? = null
+    val currency: String? = null,
+    val method: String? = null
 )
 
 @Serializable
@@ -700,7 +738,7 @@ data class OrderMessageUser(
 
 @Serializable
 data class AddOrderMessageRequest(
-    val message: String,
+    val message: String? = null,
     val status: String? = null
 )
 

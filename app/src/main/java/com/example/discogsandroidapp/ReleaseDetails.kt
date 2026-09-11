@@ -28,6 +28,8 @@ import kotlinx.coroutines.launch
 import android.util.Log
 import androidx.compose.ui.window.Dialog
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 
 private const val TAG = "ReleaseDetails"
 
@@ -42,12 +44,28 @@ fun ReleaseDetails(
     modifier: Modifier = Modifier
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
+    var effectivePriceSummary by remember(release.id, priceSummary) {
+        mutableStateOf(priceSummary)
+    }
     var isRefreshing by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     if (showSellDialog) {
+        release.id?.let { releaseId ->
+            MarketplaceConditionPriceProbe(
+                releaseId = releaseId,
+                onPrices = { prices ->
+                    effectivePriceSummary =
+                        (priceSummary ?: ReleasePriceSummary())
+                            .withActiveMarketplacePrices(prices)
+                }
+            )
+        }
+    }
+
+    if (showSellDialog) {
         AddListingDialog(
-            priceSummary = priceSummary,
+            priceSummary = effectivePriceSummary ?: priceSummary,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeve, comments ->
                 showSellDialog = false
@@ -521,7 +539,19 @@ fun AddListingDialog(
     var priceError by remember { mutableStateOf(false) }
 
     val conditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Not Graded")
-    val sleeveConditions = listOf("Mint (M)", "Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)", "Good Plus (G+)", "Good (G)", "Fair (F)", "Poor (P)", "Not Graded")
+    val sleeveConditions = listOf(
+        "Mint (M)",
+        "Near Mint (NM or M-)",
+        "Very Good Plus (VG+)",
+        "Very Good (VG)",
+        "Good Plus (G+)",
+        "Good (G)",
+        "Fair (F)",
+        "Poor (P)",
+        "Not Graded",
+        "No Cover",
+        "Generic"
+    )
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -674,6 +704,9 @@ fun AddListingDialog(
                     },
                     label = { Text("Price (USD)") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal
+                    ),
                     isError = priceError,
                     modifier = Modifier.fillMaxWidth(),
                     supportingText =

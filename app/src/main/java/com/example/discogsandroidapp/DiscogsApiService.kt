@@ -35,23 +35,6 @@ data class EditListingRequest(
     val comments: String? = null
 )
 
-// ----------------------------
-// NEW: Marketplace Listing Response (likely not defined yet)
-// ----------------------------
-@Serializable
-data class MarketplaceListingsResponse(
-    val listings: List<MarketplaceListing>
-)
-
-@Serializable
-data class MarketplaceListing(
-    val condition: String,
-    val price: Price?,          // Price is already defined elsewhere – do NOT redeclare
-    val id: Long? = null,
-    val status: String? = null,
-    val comments: String? = null
-)
-
 // IMPORTANT: Do NOT redeclare Price, MarketplaceStatsResponse, or PriceSuggestions here.
 // They are already defined elsewhere in your project.
 
@@ -92,6 +75,7 @@ interface DiscogsApiService {
         @Path("username") username: String,
         @Header("Authorization") authHeader: String,
         @Query("status") status: String = "For Sale",
+        @Query("string") searchString: String? = null,
         @Query("sort") sort: String = "listed",
         @Query("sort_order") sortOrder: String = "desc",
         @Query("page") page: Int = 1,
@@ -118,14 +102,28 @@ interface DiscogsApiService {
     ): Response<Unit>
 
     @GET("marketplace/orders")
-    fun getOrders(
+    suspend fun getOrders(
         @Header("Authorization") token: String,
         @Query("status") status: String? = null,
         @Query("page") page: Int = 1,
-        @Query("per_page") perPage: Int = 50,
+        @Query("per_page") perPage: Int = 100,
         @Query("sort") sort: String = "created",
         @Query("sort_order") sortOrder: String = "desc"
-    ): Call<DiscogsOrdersResponse>
+    ): DiscogsOrdersResponse
+
+
+    @GET("marketplace/orders/{order_id}")
+    suspend fun getOrder(
+        @Path("order_id") orderId: String,
+        @Header("Authorization") authHeader: String
+    ): DiscogsOrder
+
+    @POST("marketplace/orders/{order_id}")
+    suspend fun updateOrderStatus(
+        @Path("order_id") orderId: String,
+        @Header("Authorization") authHeader: String,
+        @Query("status") status: String
+    ): Response<okhttp3.ResponseBody>
 
 
     @GET("marketplace/orders/{order_id}/messages")
@@ -135,6 +133,13 @@ interface DiscogsApiService {
         @Query("page") page: Int = 1,
         @Query("per_page") perPage: Int = 100
     ): DiscogsOrderMessagesResponse
+
+    @POST("marketplace/orders/{order_id}/messages")
+    suspend fun updateOrderStatusViaMessage(
+        @Path("order_id") orderId: String,
+        @Header("Authorization") authHeader: String,
+        @Body request: AddOrderMessageRequest
+    ): Response<okhttp3.ResponseBody>
 
     @POST("marketplace/orders/{order_id}/messages")
     suspend fun sendOrderMessage(
@@ -164,12 +169,6 @@ interface DiscogsApiService {
         @Header("Authorization") authHeader: String
     ): PriceSuggestions  // Already defined elsewhere
 
-    @GET("marketplace/listings")
-    suspend fun getMarketplaceListings(
-        @Query("release_id") releaseId: Long,
-        @Query("status") status: String = "active",
-        @Header("Authorization") authHeader: String
-    ): MarketplaceListingsResponse
 
     @GET("masters/{master_id}/versions")
     suspend fun getMasterVersions(

@@ -19,6 +19,14 @@ val localProperties = Properties().apply {
 val discogsToken =
     localProperties.getProperty("DISCOGS_TOKEN") ?: ""
 
+val backendBaseUrl =
+    (
+        localProperties.getProperty("BACKEND_BASE_URL")
+            ?: "http://10.0.2.2:8000/"
+    ).let { url ->
+        if (url.endsWith("/")) url else "$url/"
+    }
+
 android {
     namespace = "com.example.discogsandroidapp"
 
@@ -39,6 +47,12 @@ android {
             "String",
             "DISCOGS_TOKEN",
             "\"$discogsToken\""
+        )
+
+        buildConfigField(
+            "String",
+            "BACKEND_BASE_URL",
+            "\"$backendBaseUrl\""
         )
 
         testInstrumentationRunner =

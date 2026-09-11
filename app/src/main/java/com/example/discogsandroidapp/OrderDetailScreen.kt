@@ -85,10 +85,19 @@ fun OrderDetailScreen(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Created: ${order.created ?: "N/A"}",
+                    text = "Created: ${formatOrderTimestamp(order.created)}",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (!order.lastActivity.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Last activity: ${formatOrderTimestamp(order.lastActivity)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // 5. Items List
@@ -187,48 +196,254 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // 6. Financial Totals
+                // 6. Order status controls - directly below the order items
                 item {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    val currency = order.total?.currency ?: "$"
-                    val totalVal = order.total?.value ?: 0.00
-                    val formattedTotal =
-                        String.format(java.util.Locale.getDefault(), "%s %.2f", currency, totalVal)
+                    val allowedStatuses =
+                        order.nextStatus.orEmpty()
+
+                    val canSetInProgress =
+                        order.status.equals(
+                            "Payment Received",
+                            ignoreCase = true
+                        ) ||
+                                allowedStatuses.any {
+                                    it.equals(
+                                        "In Progress",
+                                        ignoreCase = true
+                                    )
+                                }
+
+                    val canSetShipped =
+                        order.status.equals(
+                            "Payment Received",
+                            ignoreCase = true
+                        ) ||
+                                order.status.equals(
+                                    "In Progress",
+                                    ignoreCase = true
+                                ) ||
+                                allowedStatuses.any {
+                                    it.equals(
+                                        "Shipped",
+                                        ignoreCase = true
+                                    )
+                                }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text("Total", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
-                        Text(
-                            formattedTotal,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Button(
+                            onClick = {
+                                onStatusChange("Shipped")
+                            },
+                            enabled =
+                                !order.status.equals(
+                                    "Shipped",
+                                    ignoreCase = true
+                                ) && canSetShipped,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Mark as Shipped")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                onStatusChange("In Progress")
+                            },
+                            enabled =
+                                !order.status.equals(
+                                    "In Progress",
+                                    ignoreCase = true
+                                ) && canSetInProgress,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("In Progress")
+                        }
                     }
                 }
 
-                // 7. Buyer Info
+                // 7. Financial Totals
+                item {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                    val currency =
+                        order.total?.currency
+                            ?: order.shipping?.currency
+                            ?: order.items
+                                ?.firstOrNull()
+                                ?.price
+                                ?.currency
+                            ?: "USD"
+
+                    val subtotal =
+                        order.items
+                            .orEmpty()
+                            .sumOf { orderItem ->
+                                orderItem.price?.value ?: 0.0
+                            }
+
+                    @Composable
+                    fun MoneyRow(
+                        label: String,
+                        amount: Double?,
+                        emphasize: Boolean = false
+                    ) {
+                        if (amount != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = if (emphasize) 18.sp else 14.sp,
+                                    fontWeight =
+                                        if (emphasize) FontWeight.ExtraBold
+                                        else FontWeight.Normal
+                                )
+
+                                Text(
+                                    text = formatOrderMoney(
+                                        value = amount,
+                                        currency = currency
+                                    ),
+                                    fontSize = if (emphasize) 18.sp else 14.sp,
+                                    fontWeight =
+                                        if (emphasize) FontWeight.ExtraBold
+                                        else FontWeight.SemiBold,
+                                    color =
+                                        if (emphasize) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Order Summary",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    MoneyRow(
+                        label = "Subtotal",
+                        amount = subtotal
+                    )
+
+                    order.shipping?.value?.let { shippingValue ->
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        val shippingLabel =
+                            order.shipping.method
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { "Shipping ($it)" }
+                                ?: "Shipping"
+
+                        MoneyRow(
+                            label = shippingLabel,
+                            amount = shippingValue
+                        )
+                    }
+
+                    order.fee?.value?.let { feeValue ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        MoneyRow(
+                            label = "Discogs fee",
+                            amount = feeValue
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    MoneyRow(
+                        label = "Total",
+                        amount = order.total?.value,
+                        emphasize = true
+                    )
+                }
+
+                // 8. Buyer Info
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(
-                                "Buyer Information",
+                                text = "Buyer Information",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )
+
                             Spacer(modifier = Modifier.height(8.dp))
+
                             Text(
-                                text = "Username: ${order.buyer?.username ?: "Unknown"}",
-                                fontSize = 14.sp
+                                text = order.buyer?.username ?: "Unknown buyer",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
                             )
-                            // Note: To get the actual shipping address string, you may need to add a `shipping_address`
-                            // field to your DiscogsOrder data class if the API provides it!
+                        }
+                    }
+                }
+
+                if (
+                    !order.shippingAddress.isNullOrBlank() ||
+                    !order.additionalInstructions.isNullOrBlank()
+                ) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "Shipping Address",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+
+                                if (!order.shippingAddress.isNullOrBlank()) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = order.shippingAddress.trim(),
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp
+                                    )
+                                }
+
+                                if (!order.additionalInstructions.isNullOrBlank()) {
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    HorizontalDivider()
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    Text(
+                                        text = "Buyer Instructions",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Spacer(modifier = Modifier.height(4.dp))
+
+                                    Text(
+                                        text = order.additionalInstructions.trim(),
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -605,31 +820,47 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // 11. Action Buttons
                 item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { onStatusChange("In Progress") },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("In Progress")
-                        }
-                        Button(
-                            onClick = { onStatusChange("Shipped") },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Text("Mark Shipped")
-                        }
-                    }
                     Spacer(modifier = Modifier.height(24.dp))
                 }
             }
         }
+    }
+}
+
+private fun formatOrderMoney(
+    value: Double,
+    currency: String
+): String {
+    val symbol =
+        when (currency.uppercase()) {
+            "USD" -> "$"
+            "EUR" -> "€"
+            "GBP" -> "£"
+            "CAD" -> "C$"
+            "AUD" -> "A$"
+            else -> "$currency "
+        }
+
+    return "$symbol${String.format(java.util.Locale.getDefault(), "%.2f", value)}"
+}
+
+private fun formatOrderTimestamp(
+    timestamp: String?
+): String {
+    if (timestamp.isNullOrBlank()) {
+        return "N/A"
+    }
+
+    val cleaned =
+        timestamp
+            .replace("T", " ")
+            .replace("Z", "")
+
+    return if (cleaned.length >= 16) {
+        cleaned.take(16)
+    } else {
+        cleaned
     }
 }
 
@@ -648,4 +879,3 @@ private fun formatOrderMessageTimestamp(
         cleaned
     }
 }
-

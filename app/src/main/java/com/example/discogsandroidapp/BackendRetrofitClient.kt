@@ -21,7 +21,7 @@ object BackendRetrofitClient {
 
     val apiService: AiSearchApiService by lazy {
         Retrofit.Builder()
-            .baseUrl("http://10.0.2.2:8000/")
+            .baseUrl(BuildConfig.BACKEND_BASE_URL)
             .client(okHttpClient)
             .addConverterFactory(
                 json.asConverterFactory(

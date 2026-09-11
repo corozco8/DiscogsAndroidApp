@@ -235,6 +235,31 @@ async def run_inventory_agent(
         []
     )
 
+    total_matches = data.get(
+        "totalMatches"
+    )
+
+    truncated = bool(
+        data.get(
+            "truncated",
+            False
+        )
+    )
+
+    metadata_complete = bool(
+        data.get(
+            "metadataComplete",
+            True
+        )
+    )
+
+    missing_metadata = int(
+        data.get(
+            "missingMetadata",
+            0
+        ) or 0
+    )
+
     results = [
         InventoryResult.model_validate(
             item
@@ -251,5 +276,13 @@ async def run_inventory_agent(
     return {
         "status": status,
         "message": message,
-        "results": results
+        "results": results,
+        "totalMatches": (
+            int(total_matches)
+            if total_matches is not None
+            else len(results)
+        ),
+        "truncated": truncated,
+        "metadataComplete": metadata_complete,
+        "missingMetadata": missing_metadata
     }

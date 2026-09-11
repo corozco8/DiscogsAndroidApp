@@ -11,7 +11,11 @@ data class AiSearchResponse(
     val query: String,
     val summary: String? = null,
     val resultType: String,
-    val results: List<AiInventoryResult>
+    val results: List<AiInventoryResult>,
+    val totalMatches: Int? = null,
+    val truncated: Boolean = false,
+    val metadataComplete: Boolean = true,
+    val missingMetadata: Int = 0
 )
 
 @Serializable

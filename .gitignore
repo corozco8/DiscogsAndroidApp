@@ -21,3 +21,5 @@ local.properties
 /backend/release_metadata_cache.json.tmp
 /build/
 /app/build/
+/backend/inventory_cache_meta.json
+/backend/inventory_cache_meta.json.tmp

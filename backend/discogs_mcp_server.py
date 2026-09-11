@@ -61,7 +61,7 @@ def search_inventory(
     )
 
     try:
-        results = search_inventory_cache(
+        search_result = search_inventory_cache(
             artist=artist,
             title=title,
 
@@ -82,13 +82,47 @@ def search_inventory(
             sort_by=sort_by,
             sort_order=sort_order,
 
-            limit=limit
+            limit=limit,
+            include_info=True
         )
 
+        metadata_complete = (
+            search_result.get(
+                "metadataComplete",
+                True
+            )
+        )
+
+        missing_metadata = (
+            search_result.get(
+                "missingMetadata",
+                0
+            )
+        )
+
+        status = (
+            "OK"
+            if metadata_complete
+            else "PARTIAL"
+        )
+
+        message = None
+
+        if not metadata_complete:
+            message = (
+                "Metadata indexing is still in progress. "
+                f"{missing_metadata} release(s) are not indexed yet, "
+                "so metadata-based results may be incomplete."
+            )
+
         return {
-            "status": "OK",
-            "message": None,
-            "results": results
+            "status": status,
+            "message": message,
+            "results": search_result["results"],
+            "totalMatches": search_result["totalMatches"],
+            "truncated": search_result["truncated"],
+            "metadataComplete": metadata_complete,
+            "missingMetadata": missing_metadata
         }
 
     except RuntimeError as error:

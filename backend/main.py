@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+from inventory_refresh_coordinator import InventoryRefreshCoordinator
+
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from agents.mcp import (
@@ -18,10 +20,12 @@ from agent_service import (
 
 from inventory_cache import (
     cache_needs_refresh,
+    get_cache_age_seconds,
     get_cache_count,
     get_release_ids,
     refresh_cache,
-    remove_listings_from_cache
+    remove_listings_from_cache,
+    update_listing_in_cache
 )
 
 from release_metadata_cache import (
@@ -34,34 +38,42 @@ from release_metadata_cache import (
 BACKEND_DIR = Path(__file__).resolve().parent
 
 
+# Full Discogs inventory downloads are expensive relative to local cache
+# mutations. Keep exactly one refresh task in flight. Manual syncs, background
+# freshness checks and bursts from Android all await this same task rather than
+# queueing multiple complete downloads behind the cache mutation lock.
+_inventory_refresh_coordinator = InventoryRefreshCoordinator()
+
+
+async def coalesced_inventory_refresh():
+    return await _inventory_refresh_coordinator.run(
+        refresh_cache
+    )
+
+
 async def background_inventory_refresh():
+    first_pass = True
+
     while True:
         try:
-            release_ids = get_release_ids()
-
-            missing_metadata = get_missing_release_ids(
-                release_ids
-            )
-
-            if missing_metadata:
-                print(
-                    "Skipping inventory refresh while "
-                    f"metadata indexing is in progress "
-                    f"({len(missing_metadata)} remaining)."
+            # Inventory freshness and metadata indexing are independent.
+            # Always verify against Discogs once when the backend starts, then
+            # use the normal age policy. This also repairs a cache mutation that
+            # may have been missed while the backend was offline.
+            if (
+                first_pass
+                or cache_needs_refresh(
+                    max_age_seconds=3600
                 )
-
-                await asyncio.sleep(300)
-                continue
-
-            if cache_needs_refresh(
-                max_age_seconds=3600
             ):
                 print(
-                    "Inventory cache is stale. "
-                    "Refreshing in background..."
+                    "Refreshing inventory cache "
+                    "in background..."
                 )
 
-                await refresh_cache()
+                await coalesced_inventory_refresh()
+
+            first_pass = False
 
         except asyncio.CancelledError:
             raise
@@ -201,6 +213,14 @@ class RemoveInventoryCacheRequest(BaseModel):
     listingIds: list[int]
 
 
+class UpdateInventoryCacheListingRequest(BaseModel):
+    listingId: int
+    price: float
+    condition: str
+    sleeveCondition: str
+    comments: str = ""
+
+
 @app.get("/")
 def root():
     return {
@@ -210,15 +230,22 @@ def root():
 
 @app.get("/api/cache-status")
 def cache_status():
+    age = get_cache_age_seconds()
+
     return {
-        "cachedItems": get_cache_count()
+        "cachedItems": get_cache_count(),
+        "ageSeconds": age,
+        "fresh": (
+            age is not None
+            and age <= 3600
+        )
     }
 
 
 @app.post("/api/sync-inventory")
 async def sync_inventory():
     try:
-        count = await refresh_cache()
+        count = await coalesced_inventory_refresh()
 
         return {
             "status": "success",
@@ -236,11 +263,11 @@ async def sync_inventory():
 
 
 @app.post("/api/inventory-cache/remove")
-def remove_inventory_cache(
+async def remove_inventory_cache(
     cache_request: RemoveInventoryCacheRequest
 ):
     try:
-        removed = remove_listings_from_cache(
+        removed = await remove_listings_from_cache(
             cache_request.listingIds
         )
 
@@ -253,6 +280,37 @@ def remove_inventory_cache(
     except Exception as error:
         print(
             "Failed to remove listings from "
+            f"inventory cache: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
+
+
+@app.post("/api/inventory-cache/update")
+async def update_inventory_cache_listing(
+    cache_request: UpdateInventoryCacheListingRequest
+):
+    try:
+        updated = await update_listing_in_cache(
+            cache_request.listingId,
+            price=cache_request.price,
+            condition=cache_request.condition,
+            sleeve_condition=cache_request.sleeveCondition,
+            comments=cache_request.comments
+        )
+
+        return {
+            "status": "success",
+            "updated": updated,
+            "cachedItems": get_cache_count()
+        }
+
+    except Exception as error:
+        print(
+            "Failed to update listing in "
             f"inventory cache: {error}"
         )
 
@@ -289,19 +347,76 @@ async def ai_search(
                 "query": search_request.query,
                 "summary": agent_result["message"],
                 "resultType": "INDEXING",
-                "results": []
+                "results": [],
+                "totalMatches": 0,
+                "truncated": False,
+                "metadataComplete": False,
+                "missingMetadata": agent_result.get(
+                    "missingMetadata",
+                    0
+                )
             }
+
+        total_matches = agent_result.get(
+            "totalMatches",
+            len(results)
+        )
+
+        truncated = bool(
+            agent_result.get(
+                "truncated",
+                False
+            )
+        )
+
+        metadata_complete = bool(
+            agent_result.get(
+                "metadataComplete",
+                True
+            )
+        )
+
+        missing_metadata = int(
+            agent_result.get(
+                "missingMetadata",
+                0
+            ) or 0
+        )
+
+        if truncated:
+            summary = (
+                f"Showing {len(results)} of "
+                f"{total_matches} matching records."
+            )
+        else:
+            summary = (
+                f"Found {total_matches} matching records."
+            )
+
+        partial_message = agent_result.get(
+            "message"
+        )
+
+        if (
+            not metadata_complete
+            and partial_message
+        ):
+            summary = (
+                f"{summary} {partial_message}"
+            )
 
         return {
             "query": search_request.query,
-            "summary": (
-                f"Found {len(results)} matching records."
-            ),
+            "summary": summary,
             "resultType": "RECORD_LIST",
             "results": [
                 item.model_dump()
                 for item in results
-            ]
+            ],
+            "totalMatches": total_matches,
+            "truncated": truncated,
+            "metadataComplete": metadata_complete,
+            "missingMetadata": missing_metadata
         }
 
     except Exception as error:

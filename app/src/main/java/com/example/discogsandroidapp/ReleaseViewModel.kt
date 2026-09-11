@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import android.util.Log
 
 sealed interface ReleaseUiState {
@@ -14,7 +17,12 @@ sealed interface ReleaseUiState {
     object OrdersLoading : ReleaseUiState
     object AiSearch : ReleaseUiState
     data class StoreSuccess(val listings: List<InventoryListing>, val totalItems: Int, val isFetchingMore: Boolean) : ReleaseUiState
-    data class OrdersSuccess(val orders: List<DiscogsOrder>) : ReleaseUiState
+    data class OrdersSuccess(
+        val orders: List<DiscogsOrder>,
+        val totalItems: Int,
+        val isFetchingMore: Boolean = false,
+        val hasMore: Boolean = false
+    ) : ReleaseUiState
     data class SearchSuccess(val results: List<SearchResult>) : ReleaseUiState
     data class ReleaseSuccess(
         val release: DiscogsRelease,
@@ -65,6 +73,9 @@ sealed interface OrderMessagesUiState {
 
 class ReleaseViewModel : ViewModel() {
 
+    private var aiCacheRefreshJob: Job? = null
+    private var aiCacheRefreshRequested = false
+
 
     private val _uiState = MutableStateFlow<ReleaseUiState>(ReleaseUiState.Idle)
     val uiState: StateFlow<ReleaseUiState> = _uiState
@@ -102,7 +113,11 @@ class ReleaseViewModel : ViewModel() {
         order: DiscogsOrder,
         token: String
     ) {
-        _uiState.value = ReleaseUiState.OrderDetails(order)
+        // Show the row data immediately, then replace it with the complete
+        // order resource so shipping address, instructions, fees and
+        // next_status are authoritative.
+        _uiState.value =
+            ReleaseUiState.OrderDetails(order)
 
         val orderId = order.id
 
@@ -111,6 +126,34 @@ class ReleaseViewModel : ViewModel() {
                 orderId = orderId,
                 token = token
             )
+
+            viewModelScope.launch {
+                try {
+                    val fullOrder =
+                        RetrofitClient.apiService.getOrder(
+                            orderId = orderId,
+                            authHeader = "Discogs token=$token"
+                        )
+
+                    val current =
+                        _uiState.value as? ReleaseUiState.OrderDetails
+
+                    if (current?.order?.id == orderId) {
+                        _uiState.value =
+                            ReleaseUiState.OrderDetails(
+                                fullOrder
+                            )
+                    }
+                } catch (e: Exception) {
+                    // The list response is still usable. Keep it on screen and
+                    // let message loading/reporting handle its own errors.
+                    Log.e(
+                        "ORDER_DETAILS",
+                        "Failed to refresh full order $orderId",
+                        e
+                    )
+                }
+            }
         } else {
             _orderMessagesUiState.value =
                 OrderMessagesUiState.Error(
@@ -123,8 +166,127 @@ class ReleaseViewModel : ViewModel() {
         _uiState.value = ReleaseUiState.AiSearch
     }
 
-    fun updateOrderStatus(orderId: String, newStatus: String, token: String) {
-        println("Attempting to update Order $orderId to $newStatus")
+    fun updateOrderStatus(
+        orderId: String,
+        newStatus: String,
+        token: String
+    ) {
+        if (orderId.isBlank() || newStatus.isBlank()) return
+
+        viewModelScope.launch {
+            try {
+                val authHeader = "Discogs token=$token"
+
+                // Prefer Discogs' order-update endpoint. If "In Progress" is
+                // rejected there by an older API path, fall back to the order
+                // message endpoint, which also supports changing status.
+                val directResponse =
+                    RetrofitClient.apiService.updateOrderStatus(
+                        orderId = orderId,
+                        authHeader = authHeader,
+                        status = newStatus
+                    )
+
+                var statusChangeSucceeded =
+                    directResponse.isSuccessful
+
+                var lastErrorDetails =
+                    if (directResponse.isSuccessful) {
+                        null
+                    } else {
+                        directResponse.errorBody()
+                            ?.string()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "HTTP ${directResponse.code()}"
+                    }
+
+                if (
+                    !statusChangeSucceeded &&
+                    newStatus.equals(
+                        "In Progress",
+                        ignoreCase = true
+                    )
+                ) {
+                    val fallbackResponse =
+                        RetrofitClient.apiService
+                            .updateOrderStatusViaMessage(
+                                orderId = orderId,
+                                authHeader = authHeader,
+                                request =
+                                    AddOrderMessageRequest(
+                                        status = "In Progress"
+                                    )
+                            )
+
+                    statusChangeSucceeded =
+                        fallbackResponse.isSuccessful
+
+                    if (!fallbackResponse.isSuccessful) {
+                        lastErrorDetails =
+                            fallbackResponse.errorBody()
+                                ?.string()
+                                ?.takeIf { it.isNotBlank() }
+                                ?: "HTTP ${fallbackResponse.code()}"
+                    }
+                }
+
+                if (!statusChangeSucceeded) {
+                    throw IllegalStateException(
+                        "Discogs rejected $newStatus: " +
+                                (lastErrorDetails ?: "Unknown error")
+                    )
+                }
+
+                // Read the order back from Discogs rather than assuming the
+                // write succeeded. This also refreshes next_status.
+                val updatedOrder =
+                    RetrofitClient.apiService.getOrder(
+                        orderId = orderId,
+                        authHeader = authHeader
+                    )
+
+                if (
+                    !updatedOrder.status.equals(
+                        newStatus,
+                        ignoreCase = true
+                    )
+                ) {
+                    Log.w(
+                        "ORDER_STATUS",
+                        "Discogs accepted the request, but the refreshed " +
+                                "order still reports ${updatedOrder.status}."
+                    )
+                }
+
+                _uiState.value =
+                    ReleaseUiState.OrderDetails(
+                        updatedOrder
+                    )
+
+                loadOrderMessages(
+                    orderId = orderId,
+                    token = token
+                )
+
+                Log.d(
+                    "ORDER_STATUS",
+                    "Order $orderId updated to ${updatedOrder.status}"
+                )
+            } catch (e: Exception) {
+                Log.e(
+                    "ORDER_STATUS",
+                    "Failed to update order $orderId to $newStatus",
+                    e
+                )
+
+                _uiState.value =
+                    ReleaseUiState.Error(
+                        "Failed to update order status: " +
+                                (e.localizedMessage
+                                    ?: "Unknown error")
+                    )
+            }
+        }
     }
 
     fun navigateToInventory() {
@@ -161,6 +323,10 @@ class ReleaseViewModel : ViewModel() {
 
     private var currentSort = "listed"
     private var currentSortOrder = "desc"
+    private var currentStoreQuery = ""
+
+    private var storeFetchJob: Job? = null
+    private var storeRequestGeneration = 0
 
     fun fetchStoreInventory(
         token: String,
@@ -168,57 +334,168 @@ class ReleaseViewModel : ViewModel() {
         sortOrder: String = "desc",
         reset: Boolean = true
     ) {
-        if (currentUsername.isEmpty() || isFetchingNextPage) return
+        if (currentUsername.isEmpty()) return
+        if (!reset && isFetchingNextPage) return
 
-        viewModelScope.launch {
+        if (reset) {
+            storeRequestGeneration++
+            storeFetchJob?.cancel()
+            isFetchingNextPage = false
+
+            currentPage = 1
+            totalPages = 1
+            currentListings.clear()
+            currentSort = sort
+            currentSortOrder = sortOrder
+
+            _uiState.value = ReleaseUiState.StoreLoading
+        } else {
+            isFetchingNextPage = true
+            _uiState.value = ReleaseUiState.StoreSuccess(
+                listings = currentListings.toList(),
+                totalItems =
+                    (_uiState.value as? ReleaseUiState.StoreSuccess)
+                        ?.totalItems
+                        ?: currentListings.size,
+                isFetchingMore = true
+            )
+        }
+
+        val generation = storeRequestGeneration
+        val requestedPage =
             if (reset) {
-                currentPage = 1
-                currentListings.clear()
-                currentSort = sort
-                currentSortOrder = sortOrder
-                _uiState.value = ReleaseUiState.StoreLoading
+                1
             } else {
-                isFetchingNextPage = true
-                _uiState.value = ReleaseUiState.StoreSuccess(
-                    currentListings,
-                    currentListings.size,
-                    isFetchingMore = true
-                )
+                currentPage + 1
             }
 
+        storeFetchJob = viewModelScope.launch {
             try {
                 val authHeader = "Discogs token=$token"
-                val response = RetrofitClient.apiService.getInventory(
-                    username = currentUsername,
-                    authHeader = authHeader,
-                    status = "For Sale",
-                    sort = currentSort,
-                    sortOrder = currentSortOrder,
-                    page = currentPage,
-                    perPage = 50
-                )
 
-                totalPages = response.pagination.pages
+                val response =
+                    RetrofitClient.apiService.getInventory(
+                        username = currentUsername,
+                        authHeader = authHeader,
+                        status = "For Sale",
+                        searchString =
+                            currentStoreQuery
+                                .takeIf { it.isNotBlank() },
+                        sort = currentSort,
+                        sortOrder = currentSortOrder,
+                        page = requestedPage,
+                        perPage = 50
+                    )
+
+                // A newer store search/sort request replaced this one.
+                if (generation != storeRequestGeneration) {
+                    return@launch
+                }
+
+                if (
+                    _uiState.value !is ReleaseUiState.StoreLoading &&
+                    _uiState.value !is ReleaseUiState.StoreSuccess
+                ) {
+                    // The seller navigated away while the request was in
+                    // flight. Do not pull them back to My Store.
+                    return@launch
+                }
+
+                if (reset) {
+                    currentListings.clear()
+                }
+
                 currentListings.addAll(response.listings)
 
-                _uiState.value = ReleaseUiState.StoreSuccess(
-                    listings = currentListings.toList(),
-                    totalItems = response.pagination.items,
-                    isFetchingMore = false
-                )
-                isFetchingNextPage = false
-            } catch (e: Exception) {
+                // Only commit pagination progress after a successful response.
+                currentPage = requestedPage
+                totalPages = response.pagination.pages
+
                 _uiState.value =
-                    ReleaseUiState.Error(e.localizedMessage ?: "Failed to load store inventory")
-                isFetchingNextPage = false
+                    ReleaseUiState.StoreSuccess(
+                        listings = currentListings.toList(),
+                        totalItems = response.pagination.items,
+                        isFetchingMore = false
+                    )
+
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation != storeRequestGeneration) {
+                    return@launch
+                }
+
+                // If a later page fails, keep the pages already loaded instead
+                // of replacing the whole store with an error screen.
+                if (!reset && currentListings.isNotEmpty()) {
+                    _uiState.value =
+                        ReleaseUiState.StoreSuccess(
+                            listings = currentListings.toList(),
+                            totalItems =
+                                (_uiState.value as? ReleaseUiState.StoreSuccess)
+                                    ?.totalItems
+                                    ?: currentListings.size,
+                            isFetchingMore = false
+                        )
+
+                    Log.e(
+                        "STORE_PAGING",
+                        "Failed to load inventory page $requestedPage",
+                        e
+                    )
+                } else {
+                    _uiState.value =
+                        ReleaseUiState.Error(
+                            e.localizedMessage
+                                ?: "Failed to load store inventory"
+                        )
+                }
+            } finally {
+                if (generation == storeRequestGeneration) {
+                    isFetchingNextPage = false
+                }
             }
         }
     }
 
+    fun searchStoreInventory(
+        query: String,
+        token: String
+    ) {
+        currentStoreQuery = query.trim()
+
+        fetchStoreInventory(
+            token = token,
+            sort = currentSort,
+            sortOrder = currentSortOrder,
+            reset = true
+        )
+    }
+
+    fun clearStoreSearch(token: String) {
+        currentStoreQuery = ""
+
+        fetchStoreInventory(
+            token = token,
+            sort = currentSort,
+            sortOrder = currentSortOrder,
+            reset = true
+        )
+    }
+
     fun loadNextPage(token: String) {
-        if (currentPage < totalPages && !isFetchingNextPage) {
-            currentPage++
-            fetchStoreInventory(token, currentSort, currentSortOrder, reset = false)
+        if (
+            currentPage < totalPages &&
+            !isFetchingNextPage
+        ) {
+            // fetchStoreInventory computes currentPage + 1 and commits the
+            // new page number only after the request succeeds.
+            fetchStoreInventory(
+                token = token,
+                sort = currentSort,
+                sortOrder = currentSortOrder,
+                reset = false
+            )
         }
     }
 
@@ -388,6 +665,163 @@ class ReleaseViewModel : ViewModel() {
                 ?: ReleaseUiState.Idle
     }
 
+    private fun removeFromAiCacheInBackground(
+        listingIds: Collection<Long>
+    ) {
+        val ids = listingIds.distinct()
+
+        if (ids.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                BackendRetrofitClient.apiService
+                    .removeFromInventoryCache(
+                        RemoveInventoryCacheRequest(
+                            listingIds = ids
+                        )
+                    )
+            } catch (cacheError: Exception) {
+                AiCacheSyncTracker.markDirty()
+                // The seller-facing Discogs operation has already succeeded.
+                // Do not block or fail that workflow just because the optional
+                // local AI backend is offline.
+                Log.w(
+                    "INVENTORY_CACHE",
+                    "Could not prune the optional AI cache. " +
+                            "It will refresh the next time the backend syncs.",
+                    cacheError
+                )
+            }
+        }
+    }
+
+    private fun refreshAiCacheInBackground() {
+        // Mark that a full refresh is needed. If one is already running, do
+        // not launch another request. The active worker will perform at most
+        // one follow-up refresh if another invalidation arrives mid-download.
+        AiCacheSyncTracker.markDirty()
+        aiCacheRefreshRequested = true
+
+        if (aiCacheRefreshJob?.isActive == true) {
+            return
+        }
+
+        aiCacheRefreshJob = viewModelScope.launch {
+            // Combine rapid create/delete bursts before the first download.
+            delay(750)
+
+            while (aiCacheRefreshRequested) {
+                aiCacheRefreshRequested = false
+
+                try {
+                    BackendRetrofitClient.apiService
+                        .syncInventory()
+
+                    // Only call the cache fully current when no newer
+                    // mutation arrived while this download was in flight.
+                    // If another invalidation is pending, keep the dirty bit
+                    // set until the follow-up refresh finishes.
+                    if (!aiCacheRefreshRequested) {
+                        AiCacheSyncTracker
+                            .markFullSyncComplete()
+                    }
+                } catch (cacheError: Exception) {
+                    AiCacheSyncTracker.markDirty()
+                    // AI search is optional. Keep the normal seller workflow
+                    // usable, but leave a clear log that synchronization did
+                    // not complete. A later mutation/request will retry.
+                    Log.w(
+                        "INVENTORY_CACHE",
+                        "Could not refresh the optional AI inventory cache.",
+                        cacheError
+                    )
+                    break
+                }
+
+                if (aiCacheRefreshRequested) {
+                    // Small settle window for another burst that happened
+                    // while the previous network refresh was in flight.
+                    delay(250)
+                }
+            }
+        }
+    }
+
+    private suspend fun updateAiCacheListingAfterEdit(
+        listingId: Long,
+        price: Double,
+        condition: String,
+        sleeveCondition: String,
+        comments: String
+    ): Boolean {
+        return try {
+            val response =
+                BackendRetrofitClient.apiService
+                    .updateInventoryCacheListing(
+                        UpdateInventoryCacheListingRequest(
+                            listingId = listingId,
+                            price = price,
+                            condition = condition,
+                            sleeveCondition = sleeveCondition,
+                            comments = comments
+                        )
+                    )
+
+            if (
+                response.updated &&
+                !AiCacheSyncTracker.needsFullSync()
+            ) {
+                true
+            } else {
+                // The row may be missing OR an earlier mutation may have
+                // failed to reach the cache. A full synchronization is the
+                // only safe point at which AI results can be called current.
+                BackendRetrofitClient.apiService
+                    .syncInventory()
+
+                AiCacheSyncTracker
+                    .markFullSyncComplete()
+
+                true
+            }
+
+        } catch (cacheError: Exception) {
+            // The Discogs edit itself already succeeded. Do not pretend the
+            // AI cache is synchronized: callers that are waiting for cache
+            // consistency receive false and must not rerun stale AI results.
+            AiCacheSyncTracker.markDirty()
+
+            Log.w(
+                "INVENTORY_CACHE",
+                "Could not patch the optional AI inventory cache.",
+                cacheError
+            )
+
+            // Queue one best-effort full refresh for when the backend is
+            // reachable again / a later request succeeds.
+            refreshAiCacheInBackground()
+            false
+        }
+    }
+
+    private fun updateAiCacheListingInBackground(
+        listingId: Long,
+        price: Double,
+        condition: String,
+        sleeveCondition: String,
+        comments: String
+    ) {
+        viewModelScope.launch {
+            updateAiCacheListingAfterEdit(
+                listingId = listingId,
+                price = price,
+                condition = condition,
+                sleeveCondition = sleeveCondition,
+                comments = comments
+            )
+        }
+    }
+
     fun deleteListing(listingId: Long, token: String) {
         viewModelScope.launch {
             try {
@@ -402,21 +836,11 @@ class ReleaseViewModel : ViewModel() {
                 if (response.isSuccessful || response.code() == 404) {
 
                     // 404 means the listing is already gone from Discogs.
-                    // In either case, remove any stale copy from the AI cache.
-                    // Keep the FastAPI AI inventory cache in sync with Discogs.
-                    try {
-                        BackendRetrofitClient.apiService.removeFromInventoryCache(
-                            RemoveInventoryCacheRequest(
-                                listingIds = listOf(listingId)
-                            )
-                        )
-                    } catch (cacheError: Exception) {
-                        Log.e(
-                            "INVENTORY_CACHE",
-                            "Discogs delete succeeded, but backend cache removal failed for $listingId",
-                            cacheError
-                        )
-                    }
+                    // In either case, prune any stale copy from the optional
+                    // AI cache without delaying the seller-facing workflow.
+                    removeFromAiCacheInBackground(
+                        listOf(listingId)
+                    )
 
                     fetchStoreInventory(
                         token,
@@ -438,6 +862,87 @@ class ReleaseViewModel : ViewModel() {
                         "Network error: ${e.message}"
                     )
             }
+        }
+    }
+
+    /**
+     * Batch delete from the live My Store inventory.
+     *
+     * Discogs remains the source of truth for My Store, but the optional AI
+     * backend also keeps its own inventory snapshot. Successful deletions are
+     * therefore pruned from that cache in the background as well.
+     */
+    fun deleteListingsFromStore(
+        listingIds: List<Long>,
+        token: String
+    ) {
+        if (listingIds.isEmpty()) return
+
+        viewModelScope.launch {
+            val authHeader = "Discogs token=$token"
+            val uniqueIds = listingIds.distinct()
+            val deletedIds = mutableSetOf<Long>()
+            var failedCount = 0
+
+            for (listingId in uniqueIds) {
+                try {
+                    val response =
+                        RetrofitClient.apiService.deleteListing(
+                            listingId = listingId,
+                            authHeader = authHeader
+                        )
+
+                    if (response.isSuccessful || response.code() == 404) {
+                        deletedIds += listingId
+                        currentListings.removeAll { it.id == listingId }
+
+                        val previousState =
+                            _uiState.value as? ReleaseUiState.StoreSuccess
+
+                        _uiState.value = ReleaseUiState.StoreSuccess(
+                            listings = currentListings.toList(),
+                            totalItems =
+                                (previousState?.totalItems ?: currentListings.size)
+                                    .minus(1)
+                                    .coerceAtLeast(0),
+                            isFetchingMore = false
+                        )
+                    } else {
+                        failedCount++
+                        Log.e(
+                            "STORE_BULK_DELETE",
+                            "Failed to delete $listingId. HTTP ${response.code()}"
+                        )
+                    }
+                } catch (e: Exception) {
+                    failedCount++
+                    Log.e(
+                        "STORE_BULK_DELETE",
+                        "Network error deleting $listingId",
+                        e
+                    )
+                }
+            }
+
+            if (deletedIds.isNotEmpty()) {
+                removeFromAiCacheInBackground(
+                    deletedIds
+                )
+            }
+
+            // Refresh once at the end so the visible inventory exactly matches
+            // Discogs after all successful deletions.
+            fetchStoreInventory(
+                token = token,
+                sort = currentSort,
+                sortOrder = currentSortOrder,
+                reset = true
+            )
+
+            Log.d(
+                "STORE_BULK_DELETE",
+                "Deleted ${deletedIds.size}; failed $failedCount"
+            )
         }
     }
 
@@ -533,6 +1038,8 @@ class ReleaseViewModel : ViewModel() {
                     )
 
                 } catch (cacheError: Exception) {
+                    AiCacheSyncTracker.markDirty()
+
                     Log.e(
                         "AI_BULK_DELETE",
                         "Discogs deletes succeeded, but backend inventory cache sync failed",
@@ -541,9 +1048,9 @@ class ReleaseViewModel : ViewModel() {
                 }
             }
 
-            // Keep the main application on AI Inventory Search.
-            _uiState.value = ReleaseUiState.AiSearch
-
+            // Do not force navigation when the network work completes.
+            // If the seller left AI Search while deletes were running, keep
+            // their current destination.
             onComplete(
                 successfullyDeletedIds.size,
                 failedCount
@@ -557,34 +1064,90 @@ class ReleaseViewModel : ViewModel() {
         condition: String,
         sleeveCondition: String,
         comments: String,
-        token: String
+        token: String,
+        refreshStoreAfterSuccess: Boolean = true,
+        waitForAiCacheSync: Boolean = false,
+        onAiCacheSyncResult: (Boolean) -> Unit = {},
+        onSuccess: () -> Unit = {}
     ) {
+        if (!price.isFinite() || price <= 0.0) {
+            _uiState.value =
+                ReleaseUiState.Error(
+                    "Price must be a valid amount greater than $0.00."
+                )
+            return
+        }
+
         viewModelScope.launch {
             try {
-                _uiState.value = ReleaseUiState.StoreLoading
+                if (refreshStoreAfterSuccess) {
+                    _uiState.value =
+                        ReleaseUiState.StoreLoading
+                }
 
-                val requestBody = EditListingRequest(
-                    price = price,
-                    condition = condition,
-                    sleeve_condition = sleeveCondition,
-                    status = "For Sale",
-                    comments = comments
-                )
+                val requestBody =
+                    EditListingRequest(
+                        price = price,
+                        condition = condition,
+                        sleeve_condition = sleeveCondition,
+                        status = "For Sale",
+                        comments = comments
+                    )
 
-                val response = RetrofitClient.apiService.editListing(
-                    listingId = listingId,
-                    authHeader = "Discogs token=$token",
-                    request = requestBody
-                )
+                val response =
+                    RetrofitClient.apiService.editListing(
+                        listingId = listingId,
+                        authHeader = "Discogs token=$token",
+                        request = requestBody
+                    )
 
                 if (response.isSuccessful) {
-                    fetchStoreInventory(token, currentSort, currentSortOrder, reset = true)
+                    // Patch only this cached AI listing. This avoids a full
+                    // inventory download for every edit. When the caller is
+                    // waiting for consistency (AI Search edit), report whether
+                    // synchronization really succeeded before it reruns search.
+                    if (waitForAiCacheSync) {
+                        val cacheSynced =
+                            updateAiCacheListingAfterEdit(
+                                listingId = listingId,
+                                price = price,
+                                condition = condition,
+                                sleeveCondition = sleeveCondition,
+                                comments = comments
+                            )
+
+                        onAiCacheSyncResult(cacheSynced)
+                    } else {
+                        updateAiCacheListingInBackground(
+                            listingId = listingId,
+                            price = price,
+                            condition = condition,
+                            sleeveCondition = sleeveCondition,
+                            comments = comments
+                        )
+                    }
+
+                    if (refreshStoreAfterSuccess) {
+                        fetchStoreInventory(
+                            token = token,
+                            sort = currentSort,
+                            sortOrder = currentSortOrder,
+                            reset = true
+                        )
+                    }
+
+                    onSuccess()
                 } else {
                     _uiState.value =
-                        ReleaseUiState.Error("Failed to edit. HTTP Code: ${response.code()}")
+                        ReleaseUiState.Error(
+                            "Failed to edit. HTTP Code: ${response.code()}"
+                        )
                 }
             } catch (e: Exception) {
-                _uiState.value = ReleaseUiState.Error("Network error: ${e.message}")
+                _uiState.value =
+                    ReleaseUiState.Error(
+                        "Network error: ${e.message}"
+                    )
             }
         }
     }
@@ -598,12 +1161,21 @@ class ReleaseViewModel : ViewModel() {
         token: String,
         onSuccess: () -> Unit
     ) {
-        Log.d("CREATE_LISTING", ">>> createListing CALLED with releaseId=$releaseId, price=$price, condition=$condition, sleeveCondition=$sleeveCondition, comments=$comments")
+        Log.d(
+            "CREATE_LISTING",
+            ">>> createListing releaseId=$releaseId price=$price condition=$condition sleeve=$sleeveCondition"
+        )
+
+        if (!price.isFinite() || price <= 0.0) {
+            _uiState.value =
+                ReleaseUiState.Error(
+                    "Price must be a valid amount greater than $0.00."
+                )
+            return
+        }
 
         viewModelScope.launch {
             try {
-                _uiState.value = ReleaseUiState.StoreLoading
-
                 val requestBody = CreateListingRequest(
                     release_id = releaseId,
                     condition = condition,
@@ -613,30 +1185,29 @@ class ReleaseViewModel : ViewModel() {
                     status = "For Sale"
                 )
 
-                Log.d("CREATE_LISTING", "Sending request: $requestBody")
-
                 val response = RetrofitClient.apiService.createListing(
                     authHeader = "Discogs token=$token",
                     request = requestBody
                 )
 
-                Log.d("CREATE_LISTING", "Response code: ${response.code()}")
-
                 if (response.isSuccessful) {
-                    Log.d("CREATE_LISTING", "Listing created successfully (201 expected)")
+                    // The operation itself does not mutate navigation state, so
+                    // the seller stays wherever they are even if they navigated
+                    // while the network request was running.
+                    refreshAiCacheInBackground()
                     onSuccess()
-                    fetchStoreInventory(token, currentSort, currentSortOrder, reset = true)
                 } else {
                     val errorBody = response.errorBody()?.string()
-                    Log.e("CREATE_LISTING", "Error ${response.code()}: $errorBody")
-
                     _uiState.value = ReleaseUiState.Error(
-                        "Failed to list item. HTTP Code: ${response.code()} – ${errorBody ?: "no details"}"
+                        "Failed to list item. HTTP Code: ${response.code()} – " +
+                                (errorBody ?: "no details")
                     )
                 }
             } catch (e: Exception) {
-                Log.e("CREATE_LISTING", "Network or serialization error", e)
-                _uiState.value = ReleaseUiState.Error("Network error: ${e.message}")
+                Log.e("CREATE_LISTING", "Listing creation failed", e)
+                _uiState.value = ReleaseUiState.Error(
+                    "Network error: ${e.message}"
+                )
             }
         }
     }
@@ -645,33 +1216,200 @@ class ReleaseViewModel : ViewModel() {
         _uiState.value = ReleaseUiState.Idle
     }
 
+    private val currentOrders =
+        mutableListOf<DiscogsOrder>()
+
+    private var currentOrdersPage = 1
+    private var totalOrdersPages = 1
+    private var totalOrdersItems = 0
+    private var isFetchingMoreOrders = false
+    private var currentOrdersStatus = "Payment Received"
+    private var currentOrdersSortOrder = "asc"
+    private var ordersFetchJob: Job? = null
+    private var ordersRequestGeneration = 0
+
     fun fetchOrders(token: String) {
-        _uiState.value = ReleaseUiState.OrdersLoading
+        currentOrdersStatus = "Payment Received"
+        currentOrdersSortOrder = "asc"
 
-        val authHeader = "Discogs token=$token"
+        fetchOrdersPage(
+            token = token,
+            reset = true
+        )
+    }
 
-        RetrofitClient.apiService.getOrders(
-            token = authHeader,
-            status = "Payment Received",
-            sortOrder = "asc"
-        ).enqueue(object : retrofit2.Callback<DiscogsOrdersResponse> {
-            override fun onResponse(
-                call: retrofit2.Call<DiscogsOrdersResponse>,
-                response: retrofit2.Response<DiscogsOrdersResponse>
-            ) {
-                if (response.isSuccessful) {
-                    val ordersList = response.body()?.orders ?: emptyList()
-                    _uiState.value = ReleaseUiState.OrdersSuccess(ordersList)
+    fun fetchOrdersByStatus(
+        status: String,
+        token: String
+    ) {
+        currentOrdersStatus =
+            if (status == "All Orders") {
+                "All"
+            } else {
+                status
+            }
+
+        currentOrdersSortOrder = "desc"
+
+        fetchOrdersPage(
+            token = token,
+            reset = true
+        )
+    }
+
+    fun loadNextOrdersPage(token: String) {
+        if (
+            currentOrdersPage < totalOrdersPages &&
+            !isFetchingMoreOrders
+        ) {
+            fetchOrdersPage(
+                token = token,
+                reset = false
+            )
+        }
+    }
+
+    private fun fetchOrdersPage(
+        token: String,
+        reset: Boolean
+    ) {
+        if (!reset && isFetchingMoreOrders) return
+
+        if (reset) {
+            ordersRequestGeneration++
+            ordersFetchJob?.cancel()
+
+            currentOrdersPage = 1
+            totalOrdersPages = 1
+            totalOrdersItems = 0
+            currentOrders.clear()
+            isFetchingMoreOrders = false
+
+            _uiState.value =
+                ReleaseUiState.OrdersLoading
+        } else {
+            isFetchingMoreOrders = true
+
+            _uiState.value =
+                ReleaseUiState.OrdersSuccess(
+                    orders = currentOrders.toList(),
+                    totalItems = totalOrdersItems,
+                    isFetchingMore = true,
+                    hasMore =
+                        currentOrdersPage <
+                                totalOrdersPages
+                )
+        }
+
+        val generation = ordersRequestGeneration
+        val requestedPage =
+            if (reset) {
+                1
+            } else {
+                currentOrdersPage + 1
+            }
+
+        ordersFetchJob = viewModelScope.launch {
+            try {
+                val response =
+                    RetrofitClient.apiService.getOrders(
+                        token = "Discogs token=$token",
+                        status = currentOrdersStatus,
+                        page = requestedPage,
+                        perPage = 100,
+                        sortOrder = currentOrdersSortOrder
+                    )
+
+                if (generation != ordersRequestGeneration) {
+                    return@launch
+                }
+
+                if (
+                    _uiState.value !is ReleaseUiState.OrdersLoading &&
+                    _uiState.value !is ReleaseUiState.OrdersSuccess
+                ) {
+                    // The seller left Orders while this page was loading.
+                    return@launch
+                }
+
+                if (reset) {
+                    currentOrders.clear()
+                }
+
+                val existingIds =
+                    currentOrders
+                        .mapNotNull { it.id }
+                        .toMutableSet()
+
+                response.orders
+                    .orEmpty()
+                    .forEach { order ->
+                        val id = order.id
+
+                        if (
+                            id == null ||
+                            existingIds.add(id)
+                        ) {
+                            currentOrders.add(order)
+                        }
+                    }
+
+                currentOrdersPage = requestedPage
+                totalOrdersPages =
+                    response.pagination?.pages
+                        ?.coerceAtLeast(1)
+                        ?: 1
+
+                totalOrdersItems =
+                    response.pagination?.items
+                        ?: currentOrders.size
+
+                isFetchingMoreOrders = false
+
+                _uiState.value =
+                    ReleaseUiState.OrdersSuccess(
+                        orders = currentOrders.toList(),
+                        totalItems = totalOrdersItems,
+                        isFetchingMore = false,
+                        hasMore =
+                            currentOrdersPage <
+                                    totalOrdersPages
+                    )
+
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation != ordersRequestGeneration) {
+                    return@launch
+                }
+
+                isFetchingMoreOrders = false
+
+                if (!reset && currentOrders.isNotEmpty()) {
+                    _uiState.value =
+                        ReleaseUiState.OrdersSuccess(
+                            orders = currentOrders.toList(),
+                            totalItems = totalOrdersItems,
+                            isFetchingMore = false,
+                            hasMore =
+                                currentOrdersPage <
+                                        totalOrdersPages
+                        )
+
+                    Log.e(
+                        "ORDER_PAGING",
+                        "Failed to load order page $requestedPage",
+                        e
+                    )
                 } else {
                     _uiState.value =
-                        ReleaseUiState.Error("Failed to load orders: ${response.code()}")
+                        ReleaseUiState.Error(
+                            e.localizedMessage
+                                ?: "Failed to load orders"
+                        )
                 }
             }
-
-            override fun onFailure(call: retrofit2.Call<DiscogsOrdersResponse>, t: Throwable) {
-                _uiState.value = ReleaseUiState.Error(t.message ?: "Unknown network error")
-            }
-        })
+        }
     }
 
 
@@ -792,32 +1530,4 @@ class ReleaseViewModel : ViewModel() {
         _uiState.value = ReleaseUiState.RatingsWebView(username, ratingType)
     }
 
-    fun fetchOrdersByStatus(status: String, token: String) {
-        _uiState.value = ReleaseUiState.OrdersLoading
-        val authHeader = "Discogs token=$token"
-
-        val apiStatus = if (status == "All Orders") "All" else status
-
-        RetrofitClient.apiService.getOrders(
-            token = authHeader,
-            status = apiStatus,
-            sortOrder = "desc"
-        ).enqueue(object : retrofit2.Callback<DiscogsOrdersResponse> {
-            override fun onResponse(
-                call: retrofit2.Call<DiscogsOrdersResponse>,
-                response: retrofit2.Response<DiscogsOrdersResponse>
-            ) {
-                if (response.isSuccessful) {
-                    val ordersList = response.body()?.orders ?: emptyList()
-                    _uiState.value = ReleaseUiState.OrdersSuccess(ordersList)
-                } else {
-                    _uiState.value = ReleaseUiState.Error("Failed to load orders: ${response.code()}")
-                }
-            }
-
-            override fun onFailure(call: retrofit2.Call<DiscogsOrdersResponse>, t: Throwable) {
-                _uiState.value = ReleaseUiState.Error(t.message ?: "Unknown network error")
-            }
-        })
-    }
 }
