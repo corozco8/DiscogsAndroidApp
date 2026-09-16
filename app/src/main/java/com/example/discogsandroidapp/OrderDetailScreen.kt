@@ -31,7 +31,8 @@ fun OrderDetailScreen(
     onBackClick: () -> Unit,
     onStatusChange: (String) -> Unit,
     onItemClick: (Int) -> Unit,
-    onSendMessage: (String) -> Unit
+    onSendMessage: (String) -> Unit,
+    onLeaveBuyerFeedback: () -> Unit
 ) {
     var messageText by remember(order.id) {
         mutableStateOf("")
@@ -158,6 +159,20 @@ fun OrderDetailScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
+
+                                item.comments
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { comments ->
+                                        Spacer(
+                                            modifier = Modifier.height(4.dp)
+                                        )
+                                        Text(
+                                            text = "Comments: $comments",
+                                            fontSize = 12.sp,
+                                            lineHeight = 17.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
 
                                 Text(
                                     text = "ID: ${item.id ?: "N/A"}",
@@ -391,6 +406,18 @@ fun OrderDetailScreen(
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary
                             )
+
+                            Spacer(
+                                modifier = Modifier.height(12.dp)
+                            )
+
+                            OutlinedButton(
+                                onClick = onLeaveBuyerFeedback,
+                                enabled = !order.id.isNullOrBlank(),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Leave Buyer Feedback")
+                            }
                         }
                     }
                 }

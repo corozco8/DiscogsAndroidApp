@@ -12,6 +12,80 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
+
+
+private const val STALE_PAYMENT_RECEIVED_DAYS = 30
+private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
+
+/**
+ * Discogs can occasionally leave very old orders stuck in "Payment Received".
+ *
+ * Keep them out of the app's active order list once they are more than
+ * 30 calendar days old. If the date cannot be parsed, keep the order visible
+ * rather than accidentally hiding a legitimate order.
+ */
+fun visibleSellerOrders(
+    orders: List<DiscogsOrder>,
+    nowMillis: Long = System.currentTimeMillis()
+): List<DiscogsOrder> {
+    val dateParser =
+        SimpleDateFormat(
+            "yyyy-MM-dd",
+            Locale.US
+        ).apply {
+            isLenient = false
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+
+    val todayText =
+        dateParser.format(
+            java.util.Date(nowMillis)
+        )
+
+    val todayStart =
+        dateParser.parse(todayText)
+            ?.time
+            ?: nowMillis
+
+    return orders.filterNot { order ->
+        val normalizedStatus =
+            order.status
+                ?.trim()
+                ?.lowercase(Locale.US)
+                .orEmpty()
+
+        val isPaymentReceived =
+            normalizedStatus == "payment received" ||
+                    normalizedStatus == "payment recieved"
+
+        if (!isPaymentReceived) {
+            false
+        } else {
+            val createdDate =
+                order.created
+                    ?.takeIf { it.length >= 10 }
+                    ?.take(10)
+                    ?.let { dateText ->
+                        runCatching {
+                            dateParser.parse(dateText)
+                        }.getOrNull()
+                    }
+
+            if (createdDate == null) {
+                false
+            } else {
+                val ageInDays =
+                    (todayStart - createdDate.time) /
+                            MILLIS_PER_DAY
+
+                ageInDays > STALE_PAYMENT_RECEIVED_DAYS
+            }
+        }
+    }
+}
 
 @Composable
 fun OrdersScreen(
@@ -21,7 +95,10 @@ fun OrdersScreen(
     onLoadMore: () -> Unit = {},
     onOrderClick: (DiscogsOrder) -> Unit = {}
 ) {
-    if (orders.isEmpty()) {
+    val visibleOrders =
+        visibleSellerOrders(orders)
+
+    if (visibleOrders.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No active orders found.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -35,7 +112,7 @@ fun OrdersScreen(
     ) {
         // The redundant "My Orders" header item was removed from here!
 
-        items(orders) { order ->
+        items(visibleOrders) { order ->
             val safeStatus = order.status ?: "unknown"
 
             ElevatedCard(

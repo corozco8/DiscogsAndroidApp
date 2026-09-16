@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.0"
+    id("com.google.devtools.ksp")
 }
 
 val localProperties = Properties().apply {
@@ -123,4 +124,13 @@ dependencies {
     implementation(
         "com.google.android.gms:play-services-code-scanner:16.1.0"
     )
+
+    // Local-first seller data (Room)
+    val roomVersion = "2.8.5"
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    ksp("androidx.room:room-compiler:$roomVersion")
+
+    // Reliable background synchronization
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
 }

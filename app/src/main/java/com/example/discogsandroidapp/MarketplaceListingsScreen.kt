@@ -46,17 +46,41 @@ fun MarketplaceListingsScreen(
     val searchFocusRequester = remember { FocusRequester() }
     val scope = rememberCoroutineScope()
 
-    // Pull real active NM/M asking prices in the background. If Discogs
-    // changes its page markup or the probe cannot load, the approved VG+
-    // multiplier pricing remains the automatic fallback.
-    MarketplaceConditionPriceProbe(
-        releaseId = releaseId,
-        onPrices = { prices ->
-            effectivePriceSummary =
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(prices)
+    // This screen already has the real marketplace page visible. Use that
+    // exact WebView as the price source instead of loading a second hidden
+    // copy of the page.
+    val accumulatedMediaLowest =
+        remember(releaseId) { mutableMapOf<String, Double>() }
+    val accumulatedMediaSleeveLowest =
+        remember(releaseId) { mutableMapOf<String, Double>() }
+
+    fun mergeMarketplacePrices(
+        prices: ActiveMarketplaceConditionPrices
+    ) {
+        prices.mediaLowest.forEach { (grade, value) ->
+            val previous = accumulatedMediaLowest[grade]
+            if (previous == null || value < previous) {
+                accumulatedMediaLowest[grade] = value
+            }
         }
-    )
+
+        prices.mediaSleeveLowest.forEach { (key, value) ->
+            val previous = accumulatedMediaSleeveLowest[key]
+            if (previous == null || value < previous) {
+                accumulatedMediaSleeveLowest[key] = value
+            }
+        }
+
+        effectivePriceSummary =
+            (effectivePriceSummary ?: priceSummary ?: ReleasePriceSummary())
+                .withActiveMarketplacePrices(
+                    ActiveMarketplaceConditionPrices(
+                        mediaLowest = accumulatedMediaLowest.toMap(),
+                        mediaSleeveLowest =
+                            accumulatedMediaSleeveLowest.toMap()
+                    )
+                )
+    }
 
     // Filter the loaded Discogs listings as the user types. The underlying
     // marketplace page remains permanently sorted lowest price first.
@@ -163,6 +187,7 @@ fun MarketplaceListingsScreen(
             factory = { androidContext ->
                 WebView(androidContext).apply {
                     settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(
                             view: WebView,
@@ -174,6 +199,29 @@ fun MarketplaceListingsScreen(
                                 webView = view,
                                 query = searchText
                             )
+
+                            // Marketplace rows can appear after onPageFinished.
+                            // Sample this same visible page several times and
+                            // retain the lowest price seen for each media grade.
+                            listOf(
+                                0L,
+                                350L,
+                                800L,
+                                1600L,
+                                2800L,
+                                4500L
+                            ).forEach { delayMs ->
+                                view.postDelayed(
+                                    {
+                                        evaluateMarketplaceConditionPrices(
+                                            webView = view,
+                                            onPrices =
+                                                ::mergeMarketplacePrices
+                                        )
+                                    },
+                                    delayMs
+                                )
+                            }
                         }
                     }
                     loadUrl(marketplaceReleaseListingsUrl(releaseId))
@@ -189,6 +237,7 @@ fun MarketplaceListingsScreen(
     if (showSellDialog) {
         AddListingDialog(
             priceSummary = effectivePriceSummary ?: priceSummary,
+            releaseId = releaseId,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeveCondition, comments ->
                 Log.d(

@@ -99,43 +99,71 @@ data class ReleasePriceSummary(
     val activeNearMintPrice: Double? = null,
     val activeNearMintPremiumSleevePrice: Double? = null,
     val activeMintPrice: Double? = null,
-    val activeMintSleevePrice: Double? = null
+    val activeMintSleevePrice: Double? = null,
+
+    // Lowest current asking price from live Discogs marketplace listings,
+    // keyed by the exact Goldmine media condition string.
+    val activeMediaLowestPrices: Map<String, Double> = emptyMap(),
+
+    // Lowest current asking price for an exact media + sleeve combination.
+    // Key format is: "<media condition>||<sleeve condition>"
+    val activeMediaSleeveLowestPrices: Map<String, Double> = emptyMap()
 ) {
     /**
-     * Seller-focused asking-price recommendation.
+     * Lowest live asking price currently visible for this exact release.
      *
-     * Inputs are all real Discogs API signals already loaded for the release:
-     * 1. the selected condition's Discogs sold-price suggestion,
-     * 2. the full condition-price curve, used to smooth unusual grade values,
-     * 3. the current marketplace low,
-     * 4. the number of copies currently for sale.
-     *
-     * We use logarithmic/geometric blending because record prices can span
-     * very large ranges. This prevents one unusually high historical value
-     * from dominating the recommendation.
+     * For VG media or better, listings with F, P, No Cover, or Not Graded
+     * sleeves are excluded from the normal media-grade comparison. If the
+     * seller explicitly selects one of those sleeve conditions, however, use
+     * the exact media+sleeve marketplace price for that selection.
      */
-    fun recommendedPriceFor(
+    fun currentListingPriceFor(
         condition: String,
         sleeveCondition: String? = null
     ): Double? {
-        /*
-         * Premium-grade pricing rules
-         *
-         * VG+ and below still use the original V1 pricing algorithm,
-         * except VG+ gets a modest sleeve-quality bump when the sleeve
-         * is also VG+ or better.
-         *
-         * Premium examples when the base VG+ recommendation is $30:
-         *
-         * VG+ media + lower sleeve  -> $30.00
-         * VG+ media + VG+ sleeve    -> $34.50  (1.15x)
-         *
-         * NM media + lower sleeve   -> $60.00  (2.0x)
-         * NM media + NM/M sleeve    -> $75.00  (2.5x)
-         *
-         * M media + non-M sleeve    -> $120.00 (4.0x)
-         * M media + M sleeve        -> $150.00 (5.0x)
-         */
+        val rejectedSleevesForVgOrHigher = setOf(
+            "Fair (F)",
+            "Poor (P)",
+            "Not Graded",
+            "No Cover"
+        )
+
+        val vgOrHigherMedia = setOf(
+            "Very Good (VG)",
+            "Very Good Plus (VG+)",
+            "Near Mint (NM or M-)",
+            "Mint (M)"
+        )
+
+        val selectedRejectedSleeve =
+            condition in vgOrHigherMedia &&
+                sleeveCondition in rejectedSleevesForVgOrHigher
+
+        val livePrice =
+            if (selectedRejectedSleeve && sleeveCondition != null) {
+                activeMediaSleeveLowestPrices[
+                    marketplaceConditionKey(
+                        mediaCondition = condition,
+                        sleeveCondition = sleeveCondition
+                    )
+                ]
+            } else {
+                activeMediaLowestPrices[condition]
+            }
+
+        return livePrice
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?.let(::roundPrice)
+    }
+
+    /**
+     * The app's original seller-pricing algorithm. This is the silent
+     * fallback whenever a live marketplace price cannot be obtained.
+     */
+    fun fallbackRecommendedPriceFor(
+        condition: String,
+        sleeveCondition: String? = null
+    ): Double? {
         val vgPlusAnchor =
             originalRecommendationFor(
                 "Very Good Plus (VG+)"
@@ -167,63 +195,69 @@ data class ReleasePriceSummary(
                 }
 
                 "Near Mint (NM or M-)" -> {
-                    val activeMarketPrice =
-                        if (
-                            sleeveCondition == "Near Mint (NM or M-)" ||
-                            sleeveCondition == "Mint (M)"
-                        ) {
-                            activeNearMintPremiumSleevePrice
-                                ?: activeNearMintPrice
-                        } else {
-                            activeNearMintPrice
-                        }
-
-                    if (activeMarketPrice != null && activeMarketPrice > 0.0) {
-                        return roundPrice(activeMarketPrice)
-                    }
-
                     val multiplier =
                         if (
-                            sleeveCondition == "Near Mint (NM or M-)" ||
-                            sleeveCondition == "Mint (M)"
+                            sleeveCondition ==
+                            "Near Mint (NM or M-)" ||
+                            sleeveCondition ==
+                            "Mint (M)"
                         ) {
                             2.5
                         } else {
                             2.0
                         }
 
-                    return roundPrice(vgPlusAnchor * multiplier)
+                    return roundPrice(
+                        vgPlusAnchor * multiplier
+                    )
                 }
 
                 "Mint (M)" -> {
-                    val activeMarketPrice =
-                        if (sleeveCondition == "Mint (M)") {
-                            activeMintSleevePrice ?: activeMintPrice
-                        } else {
-                            activeMintPrice
-                        }
-
-                    if (activeMarketPrice != null && activeMarketPrice > 0.0) {
-                        return roundPrice(activeMarketPrice)
-                    }
-
                     val multiplier =
-                        if (sleeveCondition == "Mint (M)") {
+                        if (
+                            sleeveCondition ==
+                            "Mint (M)"
+                        ) {
                             5.0
                         } else {
                             4.0
                         }
 
-                    return roundPrice(vgPlusAnchor * multiplier)
+                    return roundPrice(
+                        vgPlusAnchor * multiplier
+                    )
                 }
             }
         }
 
-        // VG and every lower media grade keep the original
-        // seller-pricing algorithm unchanged.
         return originalRecommendationFor(
             condition
         )
+    }
+
+    /**
+     * Prefer a live current-listings price. If live pricing is unavailable,
+     * silently fall back to the original seller-pricing algorithm.
+     */
+    fun recommendedPriceFor(
+        condition: String,
+        sleeveCondition: String? = null
+    ): Double? {
+        return currentListingPriceFor(
+            condition = condition,
+            sleeveCondition = sleeveCondition
+        )
+            ?: fallbackRecommendedPriceFor(
+                condition = condition,
+                sleeveCondition = sleeveCondition
+            )
+    }
+
+    private fun marketplaceConditionKey(
+        mediaCondition: String,
+        sleeveCondition: String
+    ): String {
+        return "$mediaCondition||$sleeveCondition"
     }
 
     private fun originalRecommendationFor(
@@ -563,6 +597,17 @@ data class InventoryListing(
     val condition: String,
     @SerialName("sleeve_condition") val sleeve_condition: String = "Not Graded",
     val comments: String = "",
+
+    // Discogs marketplace listing creation timestamp.
+    // This is the field used by the local Room inventory-aging feature.
+    val posted: String? = null,
+
+    // Kept as a compatibility/fallback field for local inventory data.
+    // Discogs' listing payload normally exposes `posted`; if `date_added`
+    // is absent this simply stays null.
+    @SerialName("date_added")
+    val dateAdded: String? = null,
+
     val price: Price? = null,
     val release: ListingRelease
 )
@@ -690,6 +735,7 @@ data class OrderItem(
     val condition: String? = null,
     val media_condition: String? = null,
     val sleeve_condition: String? = null,
+    val comments: String? = null,
     val posted: String? = null,
     val date_added: String? = null
 )

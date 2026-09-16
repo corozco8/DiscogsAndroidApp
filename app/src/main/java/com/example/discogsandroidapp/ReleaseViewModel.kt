@@ -8,13 +8,32 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import android.util.Log
+
+
+data class SellerConversationSummary(
+    val order: DiscogsOrder,
+    val latestMessage: DiscogsOrderMessage,
+    val messageCount: Int
+)
 
 sealed interface ReleaseUiState {
     object Idle : ReleaseUiState
     object Loading : ReleaseUiState
     object StoreLoading : ReleaseUiState
     object OrdersLoading : ReleaseUiState
+    data object SellerInboxLoading : ReleaseUiState
+    data class SellerInboxSuccess(
+        val conversations: List<SellerConversationSummary>
+    ) : ReleaseUiState
+    data class SellerInboxError(
+        val message: String
+    ) : ReleaseUiState
     object AiSearch : ReleaseUiState
     data class StoreSuccess(val listings: List<InventoryListing>, val totalItems: Int, val isFetchingMore: Boolean) : ReleaseUiState
     data class OrdersSuccess(
@@ -47,8 +66,19 @@ sealed interface ReleaseUiState {
     data class Error(val message: String) : ReleaseUiState
     object Inventory : ReleaseUiState
     object Offers : ReleaseUiState
+    object InventoryAging : ReleaseUiState
+    object SalesAnalytics : ReleaseUiState
+    object CustomerHistory : ReleaseUiState
     data class OrderDetails(val order: DiscogsOrder) : ReleaseUiState
     data class RatingsWebView(val username: String, val ratingType: String) : ReleaseUiState
+
+    data class DiscogsWebView(
+        val title: String,
+        val url: String,
+        val returnOrder: DiscogsOrder? = null,
+        val returnToSellerInbox: Boolean = false,
+        val hideNewOrderNotifications: Boolean = false
+    ) : ReleaseUiState
 }
 
 sealed interface ProfileUiState {
@@ -94,6 +124,9 @@ class ReleaseViewModel : ViewModel() {
 
     private var currentUsername: String = ""
     private var currentReleaseId: Long? = null   // Store the release ID for suggestions
+
+    private var sellerInboxJob: Job? = null
+    private var sellerInboxGeneration: Long = 0L
 
     private var releaseBeforeMasterVersions:
             ReleaseUiState.ReleaseSuccess? = null
@@ -164,6 +197,235 @@ class ReleaseViewModel : ViewModel() {
 
     fun navigateToAiSearch() {
         _uiState.value = ReleaseUiState.AiSearch
+    }
+
+    fun openSellerInbox(token: String) {
+        sellerInboxGeneration++
+        val generation = sellerInboxGeneration
+
+        sellerInboxJob?.cancel()
+        _uiState.value = ReleaseUiState.SellerInboxLoading
+
+        sellerInboxJob = viewModelScope.launch {
+            try {
+                val authHeader = "Discogs token=$token"
+
+                // Prefer orders with the newest activity so a buyer replying to
+                // an older order can still rise to the top of the native inbox.
+                val orderResponse =
+                    try {
+                        RetrofitClient.apiService.getOrders(
+                            token = authHeader,
+                            status = null,
+                            page = 1,
+                            perPage = 30,
+                            sort = "last_activity",
+                            sortOrder = "desc"
+                        )
+                    } catch (sortError: Exception) {
+                        Log.w(
+                            "SELLER_INBOX",
+                            "last_activity sort unavailable; falling back to created",
+                            sortError
+                        )
+
+                        RetrofitClient.apiService.getOrders(
+                            token = authHeader,
+                            status = null,
+                            page = 1,
+                            perPage = 30,
+                            sort = "created",
+                            sortOrder = "desc"
+                        )
+                    }
+
+                val orders =
+                    orderResponse.orders
+                        .orEmpty()
+                        .filter { !it.id.isNullOrBlank() }
+
+                val requestLimiter = Semaphore(6)
+
+                val conversations =
+                    supervisorScope {
+                        orders.map { order ->
+                            async {
+                                requestLimiter.withPermit {
+                                    loadSellerConversation(
+                                        order = order,
+                                        authHeader = authHeader
+                                    )
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                        .filterNotNull()
+                        .sortedByDescending { conversation ->
+                            conversation.latestMessage.timestamp
+                                ?: conversation.order.lastActivity
+                                ?: conversation.order.created
+                                ?: ""
+                        }
+
+                if (
+                    generation != sellerInboxGeneration ||
+                    _uiState.value !is ReleaseUiState.SellerInboxLoading
+                ) {
+                    return@launch
+                }
+
+                _uiState.value =
+                    ReleaseUiState.SellerInboxSuccess(
+                        conversations = conversations
+                    )
+
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation != sellerInboxGeneration) {
+                    return@launch
+                }
+
+                if (_uiState.value is ReleaseUiState.SellerInboxLoading) {
+                    _uiState.value =
+                        ReleaseUiState.SellerInboxError(
+                            e.localizedMessage
+                                ?: "Failed to load seller messages"
+                        )
+                }
+
+                Log.e(
+                    "SELLER_INBOX",
+                    "Failed to load seller inbox",
+                    e
+                )
+            }
+        }
+    }
+
+    private suspend fun loadSellerConversation(
+        order: DiscogsOrder,
+        authHeader: String
+    ): SellerConversationSummary? {
+        val orderId = order.id ?: return null
+
+        return try {
+            val firstPage =
+                RetrofitClient.apiService.getOrderMessages(
+                    orderId = orderId,
+                    authHeader = authHeader,
+                    page = 1,
+                    perPage = 100
+                )
+
+            val messages = firstPage.messages.toMutableList()
+            val pages = firstPage.pagination?.pages ?: 1
+
+            if (pages > 1) {
+                for (page in 2..pages) {
+                    messages +=
+                        RetrofitClient.apiService.getOrderMessages(
+                            orderId = orderId,
+                            authHeader = authHeader,
+                            page = page,
+                            perPage = 100
+                        ).messages
+                }
+            }
+
+            val visibleMessages =
+                messages.filterNot { message ->
+                    isRedundantNewOrderMessage(message)
+                }
+
+            val latest =
+                visibleMessages.maxByOrNull { message ->
+                    message.timestamp.orEmpty()
+                }
+                ?: return null
+
+            SellerConversationSummary(
+                order = order,
+                latestMessage = latest,
+                messageCount = visibleMessages.size
+            )
+
+        } catch (e: Exception) {
+            // One broken/old order should not prevent the rest of the inbox
+            // from loading. It simply will not appear in this refresh.
+            Log.w(
+                "SELLER_INBOX",
+                "Skipping messages for order $orderId",
+                e
+            )
+            null
+        }
+    }
+
+    private fun isRedundantNewOrderMessage(
+        message: DiscogsOrderMessage
+    ): Boolean {
+        val candidates =
+            listOf(
+                message.subject,
+                message.type,
+                message.message
+            )
+
+        return candidates.any { value ->
+            value
+                ?.trim()
+                ?.startsWith(
+                    prefix = "New Order",
+                    ignoreCase = true
+                ) == true
+        }
+    }
+
+    fun openDiscogsInbox(
+        returnToSellerInbox: Boolean = false
+    ) {
+        _uiState.value =
+            ReleaseUiState.DiscogsWebView(
+                title = "Private Inbox",
+                url = "https://www.discogs.com/messages",
+                returnToSellerInbox = returnToSellerInbox,
+                hideNewOrderNotifications = true
+            )
+    }
+
+    fun openBuyerFeedback(
+        order: DiscogsOrder
+    ) {
+        val orderId = order.id ?: return
+
+        _uiState.value =
+            ReleaseUiState.DiscogsWebView(
+                title = "Buyer Feedback",
+                url = "https://www.discogs.com/sell/order/$orderId",
+                returnOrder = order
+            )
+    }
+
+    fun closeDiscogsWeb(
+        token: String
+    ) {
+        val webState =
+            _uiState.value as? ReleaseUiState.DiscogsWebView
+
+        val returnOrder =
+            webState?.returnOrder
+
+        if (returnOrder != null) {
+            navigateToOrderDetails(
+                order = returnOrder,
+                token = token
+            )
+        } else if (webState?.returnToSellerInbox == true) {
+            openSellerInbox(token)
+        } else {
+            resetToIdle()
+        }
     }
 
     fun updateOrderStatus(
@@ -295,6 +557,18 @@ class ReleaseViewModel : ViewModel() {
 
     fun navigateToOffers() {
         _uiState.value = ReleaseUiState.Offers
+    }
+
+    fun navigateToInventoryAging() {
+        _uiState.value = ReleaseUiState.InventoryAging
+    }
+
+    fun navigateToSalesAnalytics() {
+        _uiState.value = ReleaseUiState.SalesAnalytics
+    }
+
+    fun navigateToCustomerHistory() {
+        _uiState.value = ReleaseUiState.CustomerHistory
     }
 
     fun fetchUserProfile(token: String) {

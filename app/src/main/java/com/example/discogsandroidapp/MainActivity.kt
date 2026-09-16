@@ -62,6 +62,10 @@ import androidx.compose.material.icons.filled.FilterList
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Mail
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Insights
+import androidx.compose.material.icons.filled.People
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -70,12 +74,17 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: ReleaseViewModel = viewModel()
             val aiSearchViewModel: AiSearchViewModel = viewModel()
+            val sellerInsightsViewModel: SellerInsightsViewModel = viewModel()
+            val appContext = LocalContext.current.applicationContext
+
             // Your API Token
             val token = BuildConfig.DISCOGS_TOKEN
 
-            // Fetch the user profile as soon as the app opens!
+            // Fetch the profile and keep the new local seller database fresh.
             LaunchedEffect(Unit) {
                 viewModel.fetchUserProfile(token)
+                SellerSyncScheduler.schedulePeriodic(appContext)
+                SellerSyncScheduler.enqueueNow(appContext)
             }
 
             DiscogsAndroidAppTheme {
@@ -89,6 +98,11 @@ class MainActivity : ComponentActivity() {
                     val uiState by viewModel.uiState.collectAsState()
                     val profileUiState by viewModel.profileUiState.collectAsState()
                     val orderMessagesUiState by viewModel.orderMessagesUiState.collectAsState()
+                    val localInventory by sellerInsightsViewModel.inventory.collectAsState()
+                    val localOrders by sellerInsightsViewModel.orders.collectAsState()
+                    val localOrderItems by sellerInsightsViewModel.orderItems.collectAsState()
+                    val inventorySyncState by sellerInsightsViewModel.inventorySyncState.collectAsState()
+                    val orderSyncState by sellerInsightsViewModel.orderSyncState.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
@@ -111,6 +125,18 @@ class MainActivity : ComponentActivity() {
                     // Lets the release-details Back button return to My Store
                     // when a release was opened from an inventory listing.
                     var returnToStore by remember {
+                        mutableStateOf(false)
+                    }
+
+                    // When a release is opened from an order item, Back should
+                    // return to that exact order instead of the dashboard.
+                    var returnToOrderDetails by remember {
+                        mutableStateOf<DiscogsOrder?>(null)
+                    }
+
+                    // Orders opened from the native Seller Messages inbox
+                    // should return to that inbox instead of My Orders.
+                    var returnToSellerInbox by remember {
                         mutableStateOf(false)
                     }
 
@@ -145,6 +171,18 @@ class MainActivity : ComponentActivity() {
                         when (uiState) {
                             is ReleaseUiState.ReleaseSuccess -> {
                                 when {
+                                    returnToOrderDetails != null -> {
+                                        val order = returnToOrderDetails
+                                        returnToOrderDetails = null
+
+                                        if (order != null) {
+                                            viewModel.navigateToOrderDetails(
+                                                order = order,
+                                                token = token
+                                            )
+                                        }
+                                    }
+
                                     returnToStore -> {
                                         returnToStore = false
                                         viewModel.fetchStoreInventory(token)
@@ -165,8 +203,20 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             is ReleaseUiState.OrderDetails -> {
-                                viewModel.navigateToOrders(token) // Go back to order list
+                                if (returnToSellerInbox) {
+                                    returnToSellerInbox = false
+                                    viewModel.openSellerInbox(token)
+                                } else {
+                                    viewModel.navigateToOrders(token)
+                                }
                             }
+
+                            is ReleaseUiState.SellerInboxLoading,
+                            is ReleaseUiState.SellerInboxSuccess,
+                            is ReleaseUiState.SellerInboxError -> {
+                                viewModel.resetToIdle()
+                            }
+
                             else -> viewModel.resetToIdle() // Default fallback
                         }
                     }
@@ -207,9 +257,20 @@ class MainActivity : ComponentActivity() {
                                 viewModel.returnFromMasterVersions()
                             }
 
-                            // Order detail returns to the order list.
+                            // Order detail returns to whichever list opened it.
                             uiState is ReleaseUiState.OrderDetails -> {
-                                viewModel.navigateToOrders(token)
+                                if (returnToSellerInbox) {
+                                    returnToSellerInbox = false
+                                    viewModel.openSellerInbox(token)
+                                } else {
+                                    viewModel.navigateToOrders(token)
+                                }
+                            }
+
+                            // Discogs web surfaces return either to the order
+                            // that launched them or to the dashboard.
+                            uiState is ReleaseUiState.DiscogsWebView -> {
+                                viewModel.closeDiscogsWeb(token)
                             }
 
                             // Release details, store, search results, ratings,
@@ -344,7 +405,17 @@ class MainActivity : ComponentActivity() {
                             val keyboardController = LocalSoftwareKeyboardController.current
                             val searchFocusRequester = remember { FocusRequester() }
                             val scanner = remember { GmsBarcodeScanning.getClient(context) }
-                            if (uiState !is ReleaseUiState.AiSearch) {
+                            if (
+                                uiState !is ReleaseUiState.AiSearch &&
+                                uiState !is ReleaseUiState.OrderDetails &&
+                                uiState !is ReleaseUiState.SellerInboxLoading &&
+                                uiState !is ReleaseUiState.SellerInboxSuccess &&
+                                uiState !is ReleaseUiState.SellerInboxError &&
+                                uiState !is ReleaseUiState.DiscogsWebView &&
+                                uiState !is ReleaseUiState.InventoryAging &&
+                                uiState !is ReleaseUiState.SalesAnalytics &&
+                                uiState !is ReleaseUiState.CustomerHistory
+                            ) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -582,12 +653,28 @@ class MainActivity : ComponentActivity() {
                                                         viewModel.navigateToOrders(token)
                                                     },
 
+                                                    onInboxClick = {
+                                                        viewModel.openDiscogsInbox()
+                                                    },
+
                                                     onInventoryClick = {
                                                         viewModel.navigateToInventory()
                                                     },
 
                                                     onOffersClick = {
                                                         viewModel.navigateToOffers()
+                                                    },
+
+                                                    onInventoryAgingClick = {
+                                                        viewModel.navigateToInventoryAging()
+                                                    },
+
+                                                    onSalesAnalyticsClick = {
+                                                        viewModel.navigateToSalesAnalytics()
+                                                    },
+
+                                                    onCustomerHistoryClick = {
+                                                        viewModel.navigateToCustomerHistory()
                                                     },
 
                                                     onSellerRatingClick = {
@@ -620,6 +707,18 @@ class MainActivity : ComponentActivity() {
                                             username = state.username,
                                             ratingType = state.ratingType,
                                             onBackClick = { viewModel.resetToIdle() }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.DiscogsWebView -> {
+                                        DiscogsWebScreen(
+                                            title = state.title,
+                                            url = state.url,
+                                            hideNewOrderNotifications =
+                                                state.hideNewOrderNotifications,
+                                            onBackClick = {
+                                                viewModel.closeDiscogsWeb(token)
+                                            }
                                         )
                                     }
 
@@ -777,6 +876,11 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrdersLoading -> CircularProgressIndicator()
 
                                     is ReleaseUiState.OrdersSuccess -> {
+                                        val visibleOrders =
+                                            visibleSellerOrders(
+                                                state.orders
+                                            )
+
                                         var selectedStatus by remember { mutableStateOf("Payment Received") }
                                         var filterExpanded by remember { mutableStateOf(false) }
                                         val orderStatuses = listOf(
@@ -797,12 +901,7 @@ class MainActivity : ComponentActivity() {
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Text(
-                                                    text =
-                                                        if (state.totalItems > state.orders.size) {
-                                                            "My Orders (${state.orders.size}/${state.totalItems})"
-                                                        } else {
-                                                            "My Orders (${state.orders.size})"
-                                                        },
+                                                    text = "My Orders (${visibleOrders.size})",
                                                     fontSize = 20.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -836,7 +935,7 @@ class MainActivity : ComponentActivity() {
                                             }
 
                                             OrdersScreen(
-                                                orders = state.orders,
+                                                orders = visibleOrders,
                                                 isFetchingMore = state.isFetchingMore,
                                                 hasMore = state.hasMore,
                                                 onLoadMore = {
@@ -845,6 +944,7 @@ class MainActivity : ComponentActivity() {
                                                     )
                                                 },
                                                 onOrderClick = { selectedOrder ->
+                                                    returnToSellerInbox = false
                                                     viewModel.navigateToOrderDetails(
                                                         order = selectedOrder,
                                                         token = token
@@ -854,12 +954,83 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
 
+                                    is ReleaseUiState.SellerInboxLoading -> {
+                                        SellerInboxScreen(
+                                            conversations = emptyList(),
+                                            isLoading = true,
+                                            errorMessage = null,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                viewModel.openSellerInbox(token)
+                                            },
+                                            onConversationClick = {},
+                                            onPrivateInboxClick = {
+                                                viewModel.openDiscogsInbox(
+                                                    returnToSellerInbox = true
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.SellerInboxSuccess -> {
+                                        SellerInboxScreen(
+                                            conversations = state.conversations,
+                                            isLoading = false,
+                                            errorMessage = null,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                viewModel.openSellerInbox(token)
+                                            },
+                                            onConversationClick = { conversation ->
+                                                returnToSellerInbox = true
+                                                viewModel.navigateToOrderDetails(
+                                                    order = conversation.order,
+                                                    token = token
+                                                )
+                                            },
+                                            onPrivateInboxClick = {
+                                                viewModel.openDiscogsInbox(
+                                                    returnToSellerInbox = true
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.SellerInboxError -> {
+                                        SellerInboxScreen(
+                                            conversations = emptyList(),
+                                            isLoading = false,
+                                            errorMessage = state.message,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                viewModel.openSellerInbox(token)
+                                            },
+                                            onConversationClick = {},
+                                            onPrivateInboxClick = {
+                                                viewModel.openDiscogsInbox(
+                                                    returnToSellerInbox = true
+                                                )
+                                            }
+                                        )
+                                    }
+
                                     is ReleaseUiState.OrderDetails -> {
                                         OrderDetailScreen(
                                             order = state.order,
                                             messageState = orderMessagesUiState,
                                             onBackClick = {
-                                                viewModel.navigateToOrders(token)
+                                                if (returnToSellerInbox) {
+                                                    returnToSellerInbox = false
+                                                    viewModel.openSellerInbox(token)
+                                                } else {
+                                                    viewModel.navigateToOrders(token)
+                                                }
                                             },
                                             onStatusChange = { newStatus ->
                                                 state.order.id?.let { orderId ->
@@ -871,6 +1042,11 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             },
                                             onItemClick = { releaseId ->
+                                                returnToOrderDetails = state.order
+                                                returnToStore = false
+                                                returnToAiSearch = false
+                                                searchQuery = ""
+
                                                 viewModel.fetchRelease(
                                                     releaseId = releaseId.toLong(),
                                                     token = token
@@ -884,6 +1060,52 @@ class MainActivity : ComponentActivity() {
                                                         token = token
                                                     )
                                                 }
+                                            },
+                                            onLeaveBuyerFeedback = {
+                                                viewModel.openBuyerFeedback(
+                                                    state.order
+                                                )
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.InventoryAging -> {
+                                        InventoryAgingScreen(
+                                            inventory = localInventory,
+                                            syncState = inventorySyncState,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                sellerInsightsViewModel.refreshNow()
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.SalesAnalytics -> {
+                                        SalesAnalyticsScreen(
+                                            orders = localOrders,
+                                            orderItems = localOrderItems,
+                                            syncState = orderSyncState,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                sellerInsightsViewModel.refreshNow()
+                                            }
+                                        )
+                                    }
+
+                                    is ReleaseUiState.CustomerHistory -> {
+                                        CustomerHistoryScreen(
+                                            orders = localOrders,
+                                            orderItems = localOrderItems,
+                                            syncState = orderSyncState,
+                                            onBackClick = {
+                                                viewModel.resetToIdle()
+                                            },
+                                            onRefreshClick = {
+                                                sellerInsightsViewModel.refreshNow()
                                             }
                                         )
                                     }
@@ -916,8 +1138,12 @@ fun ProfileDashboard(
     onStoreClick: () -> Unit,
     onAiSearchClick: () -> Unit,
     onOrdersClick: () -> Unit,
+    onInboxClick: () -> Unit,
     onInventoryClick: () -> Unit,
     onOffersClick: () -> Unit,
+    onInventoryAgingClick: () -> Unit,
+    onSalesAnalyticsClick: () -> Unit,
+    onCustomerHistoryClick: () -> Unit,
     onSellerRatingClick: () -> Unit,
     onBuyerRatingClick: () -> Unit
 ) {
@@ -932,17 +1158,53 @@ fun ProfileDashboard(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Surface(
-            shape = CircleShape,
-            shadowElevation = 8.dp,
-            border = BorderStroke(3.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+        Box(
+            modifier = Modifier.size(140.dp),
+            contentAlignment = Alignment.Center
         ) {
-            AsyncImage(
-                model = profile.avatarUrl,
-                contentDescription = "User Avatar",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(120.dp)
-            )
+            Surface(
+                modifier = Modifier.size(120.dp),
+                shape = CircleShape,
+                shadowElevation = 8.dp,
+                border = BorderStroke(
+                    3.dp,
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                )
+            ) {
+                AsyncImage(
+                    model = profile.avatarUrl,
+                    contentDescription = "User Avatar",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            Surface(
+                modifier = Modifier
+                    .size(36.dp)
+                    .align(Alignment.TopEnd)
+                    .offset(x = (-2).dp, y = 12.dp)
+                    .clickable { onInboxClick() },
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shadowElevation = 8.dp,
+                border = BorderStroke(
+                    2.dp,
+                    MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Mail,
+                        contentDescription = "Discogs Inbox",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -1050,6 +1312,43 @@ fun ProfileDashboard(
                 title = "My Offers",
                 icon = Icons.Default.LocalOffer,
                 onClick = onOffersClick
+            )
+        }
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        Text(
+            text = "Seller Insights",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    bottom = 12.dp,
+                    start = 4.dp
+                ),
+            textAlign = TextAlign.Start
+        )
+
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            MenuBrick(
+                title = "Inventory Aging",
+                icon = Icons.Default.AccessTime,
+                onClick = onInventoryAgingClick
+            )
+
+            MenuBrick(
+                title = "Sales & Profit Analytics",
+                icon = Icons.Default.Insights,
+                onClick = onSalesAnalyticsClick
+            )
+
+            MenuBrick(
+                title = "Customer History",
+                icon = Icons.Default.People,
+                onClick = onCustomerHistoryClick
             )
         }
     }
