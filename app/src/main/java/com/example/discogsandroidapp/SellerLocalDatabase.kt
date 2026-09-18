@@ -93,6 +93,17 @@ interface SellerLocalDao {
     @Query("DELETE FROM seller_inventory WHERE lastSeenAtEpochMs < :syncStartedAtEpochMs")
     suspend fun deleteInventoryNotSeenInSync(syncStartedAtEpochMs: Long)
 
+    @Transaction
+    suspend fun replaceInventorySnapshot(
+        listings: List<LocalInventoryListingEntity>,
+        syncStartedAtEpochMs: Long
+    ) {
+        if (listings.isNotEmpty()) {
+            upsertInventory(listings)
+        }
+        deleteInventoryNotSeenInSync(syncStartedAtEpochMs)
+    }
+
     @Query("SELECT * FROM seller_orders ORDER BY createdAtEpochMs DESC")
     fun observeOrders(): Flow<List<LocalOrderEntity>>
 

@@ -111,11 +111,14 @@ class AiSearchViewModel : ViewModel() {
                 // AI backend/cache update failed, repair the full inventory
                 // snapshot before answering another AI question.
                 if (AiCacheSyncTracker.needsFullSync()) {
+                    val revisionAtStart =
+                        AiCacheSyncTracker.captureRevision()
+
                     BackendRetrofitClient.apiService
                         .syncInventory()
 
                     AiCacheSyncTracker
-                        .markFullSyncComplete()
+                        .markFullSyncComplete(revisionAtStart)
                 }
 
                 val response =

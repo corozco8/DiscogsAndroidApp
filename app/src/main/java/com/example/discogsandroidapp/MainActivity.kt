@@ -10,6 +10,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -51,6 +53,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.QrCodeScanner
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -66,6 +69,7 @@ import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.ChevronRight
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -105,6 +109,11 @@ class MainActivity : ComponentActivity() {
                     val orderSyncState by sellerInsightsViewModel.orderSyncState.collectAsState()
 
                     var searchQuery by remember { mutableStateOf("") }
+                    var storeSort by remember { mutableStateOf("listed") }
+                    var storeSortOrder by remember { mutableStateOf("desc") }
+                    // Hoist the My Store list state above the navigation content so
+                    // opening a release does not discard the user's scroll position.
+                    val storeListState = rememberLazyListState()
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
                     var marketplacePriceSummary by remember {
                         mutableStateOf<ReleasePriceSummary?>(null)
@@ -185,7 +194,10 @@ class MainActivity : ComponentActivity() {
 
                                     returnToStore -> {
                                         returnToStore = false
-                                        viewModel.fetchStoreInventory(token)
+                                        // Restore the already-loaded inventory snapshot instead
+                                        // of fetching page 1 again. This preserves sort, loaded
+                                        // pages, search context and the hoisted scroll position.
+                                        viewModel.restoreStoreInventory(token)
                                     }
 
                                     returnToAiSearch -> {
@@ -391,6 +403,20 @@ class MainActivity : ComponentActivity() {
                             onBackClick = {
                                 marketplaceReleaseId = null
                                 marketplacePriceSummary = null
+                            },
+                            onSearchRequested = { query ->
+                                searchQuery = query
+                                marketplaceReleaseId = null
+                                marketplacePriceSummary = null
+                                barcodeSearchPending = false
+                                viewModel.search(query, token)
+                            },
+                            onBarcodeSearchRequested = { scannedValue ->
+                                searchQuery = scannedValue
+                                marketplaceReleaseId = null
+                                marketplacePriceSummary = null
+                                barcodeSearchPending = true
+                                viewModel.search(scannedValue, token)
                             }
                         )
                     } else {
@@ -403,6 +429,7 @@ class MainActivity : ComponentActivity() {
                             // 1. ALWAYS VISIBLE Search Bar Header
                             val context = LocalContext.current
                             val keyboardController = LocalSoftwareKeyboardController.current
+                            val focusManager = LocalFocusManager.current
                             val searchFocusRequester = remember { FocusRequester() }
                             val scanner = remember { GmsBarcodeScanning.getClient(context) }
                             if (
@@ -470,19 +497,16 @@ class MainActivity : ComponentActivity() {
                                         keyboardActions = KeyboardActions(
                                             onSearch = {
                                                 if (
-                                                    uiState is ReleaseUiState.StoreSuccess ||
-                                                    uiState is ReleaseUiState.StoreLoading
+                                                    uiState !is ReleaseUiState.StoreSuccess &&
+                                                    uiState !is ReleaseUiState.StoreLoading
                                                 ) {
-                                                    viewModel.searchStoreInventory(
-                                                        query = searchQuery,
-                                                        token = token
-                                                    )
-                                                } else {
                                                     viewModel.search(
                                                         searchQuery,
                                                         token
                                                     )
                                                 }
+                                                // My Store search is filtered locally from the
+                                                // synchronized full inventory as the user types.
                                                 keyboardController?.hide()
                                             }
                                         ),
@@ -491,13 +515,6 @@ class MainActivity : ComponentActivity() {
                                                 IconButton(
                                                     onClick = {
                                                         searchQuery = ""
-
-                                                        if (
-                                                            uiState is ReleaseUiState.StoreSuccess ||
-                                                            uiState is ReleaseUiState.StoreLoading
-                                                        ) {
-                                                            viewModel.clearStoreSearch(token)
-                                                        }
 
                                                         searchFocusRequester.requestFocus()
                                                         appScope.launch {
@@ -519,7 +536,7 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.width(8.dp)
                                     )
 
-                                    Button(
+                                    FilledIconButton(
                                         onClick = {
                                             scanner.startScan()
                                                 .addOnSuccessListener { barcode ->
@@ -532,10 +549,8 @@ class MainActivity : ComponentActivity() {
                                                             uiState is ReleaseUiState.StoreSuccess ||
                                                             uiState is ReleaseUiState.StoreLoading
                                                         ) {
-                                                            viewModel.searchStoreInventory(
-                                                                query = scannedValue,
-                                                                token = token
-                                                            )
+                                                            // My Store reacts to searchQuery directly.
+                                                            barcodeSearchPending = false
                                                         } else {
                                                             viewModel.search(
                                                                 scannedValue,
@@ -543,15 +558,21 @@ class MainActivity : ComponentActivity() {
                                                             )
                                                         }
 
+                                                        // The scanner returns control to this Activity while the
+                                                        // search field may still own focus. Hiding the IME alone can
+                                                        // let Android reopen it immediately, so also clear focus.
+                                                        focusManager.clearFocus(force = true)
                                                         keyboardController?.hide()
                                                     }
                                                 }
                                         },
-                                        contentPadding = PaddingValues(12.dp)
+                                        modifier = Modifier.size(54.dp),
+                                        shape = RoundedCornerShape(16.dp)
                                     ) {
                                         Icon(
                                             Icons.Default.QrCodeScanner,
-                                            contentDescription = "Scan Barcode"
+                                            contentDescription = "Scan Barcode",
+                                            modifier = Modifier.size(22.dp)
                                         )
                                     }
                                 }
@@ -724,36 +745,93 @@ class MainActivity : ComponentActivity() {
 
                                     is ReleaseUiState.StoreLoading -> CircularProgressIndicator()
 
-                                    is ReleaseUiState.StoreSuccess -> StoreScreen(
-                                        listings = state.listings,
-                                        totalItems = state.totalItems,
-                                        isFetchingMore = state.isFetchingMore,
-                                        onSortChanged = { sortField, sortOrder ->
-                                            viewModel.fetchStoreInventory(token, sortField, sortOrder, reset = true)
-                                        },
-                                        onLoadMore = { viewModel.loadNextPage(token) },
-                                        onDeleteListing = { listingId ->
-                                            viewModel.deleteListing(listingId, token)
-                                        },
-                                        onDeleteSelected = { listingIds ->
-                                            viewModel.deleteListingsFromStore(
-                                                listingIds = listingIds,
-                                                token = token
-                                            )
-                                        },
-                                        onEditListing = { id, price, condition, sleeveCondition, comments ->
-                                            viewModel.editListing(id, price, condition, sleeveCondition, comments, token)
-                                        },
-                                        onListingClick = { listing ->
-                                            returnToStore = true
-                                            returnToAiSearch = false
-                                            searchQuery = ""
-                                            viewModel.fetchRelease(
-                                                releaseId = listing.release.id,
-                                                token = token
-                                            )
-                                        }
-                                    )
+                                    is ReleaseUiState.StoreSuccess -> {
+                                        val storeSearchActive = searchQuery.isNotBlank()
+                                        val displayedStoreListings =
+                                            remember(
+                                                searchQuery,
+                                                localInventory,
+                                                state.listings,
+                                                storeSort,
+                                                storeSortOrder
+                                            ) {
+                                                if (storeSearchActive) {
+                                                    buildStoreSearchResults(
+                                                        inventory = localInventory,
+                                                        fallbackListings = state.listings,
+                                                        query = searchQuery,
+                                                        sort = storeSort,
+                                                        sortOrder = storeSortOrder
+                                                    )
+                                                } else {
+                                                    state.listings
+                                                }
+                                            }
+
+                                        StoreScreen(
+                                            listings = displayedStoreListings,
+                                            token = token,
+                                            listState = storeListState,
+                                            totalItems =
+                                                if (storeSearchActive) {
+                                                    displayedStoreListings.size
+                                                } else {
+                                                    state.totalItems
+                                                },
+                                            isFetchingMore =
+                                                if (storeSearchActive) false
+                                                else state.isFetchingMore,
+                                            onSortChanged = { sortField, sortOrder ->
+                                                storeSort = sortField
+                                                storeSortOrder = sortOrder
+                                                // A deliberate sort change should start at the top,
+                                                // but simply viewing a release should not.
+                                                appScope.launch {
+                                                    storeListState.scrollToItem(0)
+                                                }
+                                                viewModel.fetchStoreInventory(
+                                                    token,
+                                                    sortField,
+                                                    sortOrder,
+                                                    reset = true
+                                                )
+                                            },
+                                            onLoadMore = {
+                                                if (!storeSearchActive) {
+                                                    viewModel.loadNextPage(token)
+                                                }
+                                            },
+                                            onDeleteListing = { listingId ->
+                                                viewModel.deleteListing(listingId, token)
+                                            },
+                                            onDeleteSelected = { listingIds ->
+                                                viewModel.deleteListingsFromStore(
+                                                    listingIds = listingIds,
+                                                    token = token
+                                                )
+                                            },
+                                            onEditListing = { id, price, condition, sleeveCondition, comments ->
+                                                viewModel.editListing(
+                                                    id,
+                                                    price,
+                                                    condition,
+                                                    sleeveCondition,
+                                                    comments,
+                                                    token
+                                                )
+                                            },
+                                            onListingClick = { listing ->
+                                                returnToStore = true
+                                                returnToAiSearch = false
+                                                // Keep the current My Store search text while the
+                                                // release is open so Back returns to the same view.
+                                                viewModel.fetchRelease(
+                                                    releaseId = listing.release.id,
+                                                    token = token
+                                                )
+                                            }
+                                        )
+                                    }
 
                                     is ReleaseUiState.Loading -> CircularProgressIndicator()
 
@@ -817,6 +895,14 @@ class MainActivity : ComponentActivity() {
                                                     masterId = masterId,
                                                     token = token
                                                 )
+                                            },
+                                            onRefresh = {
+                                                state.release.id?.let { releaseId ->
+                                                    viewModel.fetchRelease(
+                                                        releaseId = releaseId,
+                                                        token = token
+                                                    )
+                                                }
                                             }
                                         )
                                     }
@@ -1052,12 +1138,16 @@ class MainActivity : ComponentActivity() {
                                                     token = token
                                                 )
                                             },
-                                            onSendMessage = { message ->
-                                                state.order.id?.let { orderId ->
+                                            onSendMessage = { message, onResult ->
+                                                val orderId = state.order.id
+                                                if (orderId == null) {
+                                                    onResult(false)
+                                                } else {
                                                     viewModel.sendOrderMessage(
                                                         orderId = orderId,
                                                         message = message,
-                                                        token = token
+                                                        token = token,
+                                                        onResult = onResult
                                                     )
                                                 }
                                             },
@@ -1114,7 +1204,7 @@ class MainActivity : ComponentActivity() {
                                         PlaceholderScreen("Inventory List")
 
                                     is ReleaseUiState.Offers ->
-                                        PlaceholderScreen("Pending Offers")
+                                        OffersPlaceholderScreen()
 
                                     else -> {
                                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1150,25 +1240,28 @@ fun ProfileDashboard(
     val formattedSeller = String.format(java.util.Locale.getDefault(), "%.1f", profile.sellerRating / 20.0)
     val formattedBuyer = String.format(java.util.Locale.getDefault(), "%.1f", profile.buyerRating / 20.0)
     val memberYear = if (profile.registered.length >= 4) profile.registered.take(4) else "Unknown"
+    val countFormat = java.text.NumberFormat.getIntegerInstance(java.util.Locale.getDefault())
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(24.dp)
+            .padding(horizontal = 20.dp, vertical = 8.dp)
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Compact profile header. The avatar remains the visual anchor without
+        // consuming most of the first screen.
         Box(
-            modifier = Modifier.size(140.dp),
+            modifier = Modifier.size(110.dp),
             contentAlignment = Alignment.Center
         ) {
             Surface(
-                modifier = Modifier.size(120.dp),
+                modifier = Modifier.size(94.dp),
                 shape = CircleShape,
-                shadowElevation = 8.dp,
+                shadowElevation = 5.dp,
                 border = BorderStroke(
-                    3.dp,
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    2.dp,
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                 )
             ) {
                 AsyncImage(
@@ -1181,18 +1274,15 @@ fun ProfileDashboard(
 
             Surface(
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(32.dp)
                     .align(Alignment.TopEnd)
-                    .offset(x = (-2).dp, y = 12.dp)
+                    .offset(x = (-2).dp, y = 8.dp)
                     .clickable { onInboxClick() },
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                shadowElevation = 8.dp,
-                border = BorderStroke(
-                    2.dp,
-                    MaterialTheme.colorScheme.surface
-                )
+                shadowElevation = 5.dp,
+                border = BorderStroke(2.dp, MaterialTheme.colorScheme.surface)
             ) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -1201,95 +1291,71 @@ fun ProfileDashboard(
                     Icon(
                         imageVector = Icons.Default.Mail,
                         contentDescription = "Discogs Inbox",
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         Text(
             text = profile.username,
-            fontSize = 28.sp,
+            fontSize = 24.sp,
             fontWeight = FontWeight.ExtraBold,
             color = MaterialTheme.colorScheme.primary,
-            letterSpacing = 1.sp
+            letterSpacing = 0.5.sp
         )
         Text(
             text = "Member since $memberYear",
-            fontSize = 14.sp,
+            fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 4.dp)
+            modifier = Modifier.padding(top = 2.dp)
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        Row(
+        // One compact rating card replaces the two large dashboard cards.
+        ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            shape = RoundedCornerShape(16.dp)
         ) {
-            ElevatedCard(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onSellerRatingClick() },
-                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Star, contentDescription = "Star", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "$formattedSeller (${profile.sellerNumRatings})", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = "Seller rating", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
-                }
-            }
+                CompactRatingItem(
+                    modifier = Modifier.weight(1f),
+                    rating = formattedSeller,
+                    count = countFormat.format(profile.sellerNumRatings),
+                    label = "Seller",
+                    onClick = onSellerRatingClick
+                )
 
-            ElevatedCard(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onBuyerRatingClick() },
-                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Star, contentDescription = "Star", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "$formattedBuyer (${profile.buyerNumRatings})", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = "Buyer rating", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
-                }
+                VerticalDivider(
+                    modifier = Modifier.height(36.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
+                )
+
+                CompactRatingItem(
+                    modifier = Modifier.weight(1f),
+                    rating = formattedBuyer,
+                    count = countFormat.format(profile.buyerNumRatings),
+                    label = "Buyer",
+                    onClick = onBuyerRatingClick
+                )
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(22.dp))
 
-        Text(
-            text = "Selling",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp, start = 4.dp),
-            textAlign = TextAlign.Start
-        )
+        DashboardSectionTitle("Selling")
 
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             MenuBrick(
                 title = "My Store",
                 icon = Icons.Default.Store,
@@ -1315,24 +1381,11 @@ fun ProfileDashboard(
             )
         }
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(22.dp))
 
-        Text(
-            text = "Seller Insights",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(
-                    bottom = 12.dp,
-                    start = 4.dp
-                ),
-            textAlign = TextAlign.Start
-        )
+        DashboardSectionTitle("Seller Insights")
 
-        Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             MenuBrick(
                 title = "Inventory Aging",
                 icon = Icons.Default.AccessTime,
@@ -1351,7 +1404,67 @@ fun ProfileDashboard(
                 onClick = onCustomerHistoryClick
             )
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
     }
+}
+
+@Composable
+private fun CompactRatingItem(
+    modifier: Modifier = Modifier,
+    rating: String,
+    count: String,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Star,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(17.dp)
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = rating,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "($count)",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "$label rating",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun DashboardSectionTitle(title: String) {
+    Text(
+        text = title,
+        fontSize = 17.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp, start = 2.dp),
+        textAlign = TextAlign.Start
+    )
 }
 
 @Composable
@@ -1360,25 +1473,50 @@ fun MenuBrick(title: String, icon: ImageVector, onClick: () -> Unit = {}) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() },
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(14.dp)
     ) {
         Row(
             modifier = Modifier
-                .padding(16.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = title,
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.width(16.dp))
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.primary
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = title,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
             Text(
                 text = title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                modifier = Modifier.size(20.dp)
             )
         }
     }
@@ -1482,6 +1620,67 @@ fun SearchResultRow(result: SearchResult, onClick: () -> Unit) {
 }
 
 @Composable
+fun OffersPlaceholderScreen() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 30.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Surface(
+                    modifier = Modifier.size(56.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocalOffer,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "My Offers",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "No pending offers right now.",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun PlaceholderScreen(title: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -1496,9 +1695,137 @@ fun PlaceholderScreen(title: String) {
     }
 }
 
+private fun buildStoreSearchResults(
+    inventory: List<LocalInventoryListingEntity>,
+    fallbackListings: List<InventoryListing>,
+    query: String,
+    sort: String,
+    sortOrder: String
+): List<InventoryListing> {
+    val terms =
+        query.trim()
+            .lowercase()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+
+    if (terms.isEmpty()) return fallbackListings
+
+    fun InventoryListing.matchesSearch(): Boolean {
+        val haystack =
+            listOf(
+                id.toString(),
+                release.id.toString(),
+                release.artist,
+                release.title,
+                release.description,
+                condition,
+                sleeve_condition,
+                comments,
+                price?.value?.toString().orEmpty()
+            )
+                .joinToString(" ")
+                .lowercase()
+
+        return terms.all { term -> term in haystack }
+    }
+
+    // The local seller inventory contains the full synchronized store, while
+    // the visible API list is paginated. This makes My Store search cover the
+    // whole inventory instead of only the first page currently on screen.
+    if (inventory.isEmpty()) {
+        return fallbackListings.filter { it.matchesSearch() }
+    }
+
+    val matches =
+        inventory.filter { listing ->
+            val haystack =
+                listOf(
+                    listing.listingId.toString(),
+                    listing.releaseId.toString(),
+                    listing.artist,
+                    listing.title,
+                    listing.comments,
+                    listing.mediaCondition,
+                    listing.sleeveCondition,
+                    listing.priceValue?.toString().orEmpty()
+                )
+                    .joinToString(" ")
+                    .lowercase()
+
+            terms.all { term -> term in haystack }
+        }
+
+    val sorted =
+        when (sort) {
+            "price" -> {
+                if (sortOrder == "desc") {
+                    matches.sortedByDescending {
+                        it.priceValue ?: Double.NEGATIVE_INFINITY
+                    }
+                } else {
+                    matches.sortedBy {
+                        it.priceValue ?: Double.POSITIVE_INFINITY
+                    }
+                }
+            }
+
+            "title", "item" -> {
+                if (sortOrder == "desc") {
+                    matches.sortedByDescending { it.title.lowercase() }
+                } else {
+                    matches.sortedBy { it.title.lowercase() }
+                }
+            }
+
+            "artist" -> {
+                if (sortOrder == "desc") {
+                    matches.sortedByDescending { it.artist.lowercase() }
+                } else {
+                    matches.sortedBy { it.artist.lowercase() }
+                }
+            }
+
+            else -> {
+                if (sortOrder == "asc") {
+                    matches.sortedBy { it.listedAtEpochMs }
+                } else {
+                    matches.sortedByDescending { it.listedAtEpochMs }
+                }
+            }
+        }
+
+    return sorted.map { listing ->
+        InventoryListing(
+            id = listing.listingId,
+            status = listing.status,
+            condition = listing.mediaCondition,
+            sleeve_condition = listing.sleeveCondition,
+            comments = listing.comments,
+            posted = listing.postedRaw,
+            price =
+                listing.priceValue?.let { value ->
+                    Price(
+                        value = value,
+                        currency = listing.currency
+                    )
+                },
+            release =
+                ListingRelease(
+                    id = listing.releaseId,
+                    description = "${listing.artist} - ${listing.title}",
+                    thumbnail = listing.thumbnail,
+                    title = listing.title,
+                    artist = listing.artist
+                )
+        )
+    }
+}
+
 @Composable
 fun StoreScreen(
     listings: List<InventoryListing>,
+    token: String,
+    listState: LazyListState,
     totalItems: Int,
     isFetchingMore: Boolean,
     onSortChanged: (sort: String, sortOrder: String) -> Unit,
@@ -1544,6 +1871,7 @@ fun StoreScreen(
     listingToView?.let { listing ->
         ListingDetailsDialog(
             listing = listing,
+            token = token,
             onDismiss = { listingToView = null },
             onEditClick = {
                 listingToView = null
@@ -1560,43 +1888,69 @@ fun StoreScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (selectionMode) {
-                TextButton(
-                    onClick = { selectedListingIds = emptySet() }
-                ) {
-                    Text("Cancel")
-                }
-
-                TextButton(
-                    onClick = {
-                        val ids = selectedListingIds.toList()
-                        if (ids.isNotEmpty()) {
-                            onDeleteSelected(ids)
-                        }
-                        selectedListingIds = emptySet()
-                    }
-                ) {
+                Column {
                     Text(
-                        text = "Delete (${selectedListingIds.size})",
-                        color = MaterialTheme.colorScheme.error
+                        text = "${selectedListingIds.size} selected",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "Tap more items to add them",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = { selectedListingIds = emptySet() }
+                    ) {
+                        Text("Cancel")
+                    }
+
+                    TextButton(
+                        onClick = {
+                            val ids = selectedListingIds.toList()
+                            if (ids.isNotEmpty()) {
+                                onDeleteSelected(ids)
+                            }
+                            selectedListingIds = emptySet()
+                        }
+                    ) {
+                        Text(
+                            text = "Delete",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             } else {
-                Text(
-                    text = "My Store ($totalItems Items)",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Column {
+                    Text(
+                        text = "My Store",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "${java.text.NumberFormat.getIntegerInstance(java.util.Locale.getDefault()).format(totalItems)} active listings",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 Box {
-                    IconButton(onClick = { expanded = true }) {
+                    FilledTonalIconButton(
+                        onClick = { expanded = true },
+                        modifier = Modifier.size(42.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Sort,
-                            contentDescription = "Sort Options"
+                            contentDescription = "Sort Options",
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -1629,13 +1983,14 @@ fun StoreScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
                     bottom = 16.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(9.dp)
             ) {
                 itemsIndexed(
                     items = listings,
@@ -1702,7 +2057,7 @@ fun InventoryItemCard(
                     Modifier.border(
                         width = 2.dp,
                         color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(16.dp)
                     )
                 } else {
                     Modifier
@@ -1712,18 +2067,19 @@ fun InventoryItemCard(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor =
                 if (isSelected) {
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.38f)
                 } else {
                     MaterialTheme.colorScheme.surface
                 }
         )
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             AsyncImage(
@@ -1732,51 +2088,38 @@ fun InventoryItemCard(
                 contentDescription = "Cover",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
-                    .size(72.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(10.dp))
             )
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = listing.release.description,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    maxLines = 2,
+                    fontSize = 14.sp,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Surface(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = listing.status.uppercase(),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val priceText = listing.price?.let {
-                        String.format(
-                            java.util.Locale.getDefault(),
-                            "%s %.2f",
-                            it.currency,
-                            it.value
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = listing.status.uppercase(),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
-                    } ?: "N/A"
-
-                    Text(
-                        text = priceText,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    }
 
                     Spacer(modifier = Modifier.width(8.dp))
 
@@ -1786,19 +2129,42 @@ fun InventoryItemCard(
                         if (sleeve == "Not Graded") media else "$media / $sleeve"
 
                     Text(
-                        text = "• $gradeText",
+                        text = gradeText,
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
                     )
                 }
+
+                Spacer(modifier = Modifier.height(5.dp))
+
+                val priceText = listing.price?.let {
+                    String.format(
+                        java.util.Locale.getDefault(),
+                        "%s %,.2f",
+                        it.currency,
+                        it.value
+                    )
+                } ?: "N/A"
+
+                Text(
+                    text = priceText,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
 
             if (!selectionMode) {
                 Box {
-                    IconButton(onClick = { menuExpanded = true }) {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.size(40.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Item Options"
+                            contentDescription = "Item Options",
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -2012,10 +2378,35 @@ fun getShortGrade(grade: String): String {
 @Composable
 fun ListingDetailsDialog(
     listing: InventoryListing,
+    token: String,
     onDismiss: () -> Unit,
     onEditClick: () -> Unit,
     onViewClick: () -> Unit
 ) {
+    var highResolutionImageUrl by remember(listing.release.id) {
+        mutableStateOf<String?>(null)
+    }
+
+    // Inventory payloads only include Discogs' small thumbnail. Fetch the
+    // release once when the preview opens so the dialog can use the original
+    // release image instead of stretching the low-resolution thumbnail.
+    LaunchedEffect(listing.release.id, token) {
+        highResolutionImageUrl =
+            try {
+                RetrofitClient.apiService
+                    .getRelease(
+                        releaseId = listing.release.id,
+                        authHeader = "Discogs token=$token"
+                    )
+                    .images
+                    ?.firstOrNull()
+                    ?.uri
+                    ?.takeIf { it.isNotBlank() }
+            } catch (_: Exception) {
+                null
+            }
+    }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(16.dp),
@@ -2024,7 +2415,10 @@ fun ListingDetailsDialog(
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 AsyncImage(
-                    model = listing.release.thumbnail.takeIf { it.isNotBlank() } ?: "https://via.placeholder.com/300",
+                    model =
+                        highResolutionImageUrl
+                            ?: listing.release.thumbnail.takeIf { it.isNotBlank() }
+                            ?: "https://via.placeholder.com/600",
                     contentDescription = "Cover",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier

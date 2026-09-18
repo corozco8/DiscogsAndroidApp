@@ -1,6 +1,8 @@
 package com.example.discogsandroidapp
 
 import android.content.Context
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -22,95 +24,150 @@ class SellerLocalRepository(context: Context) {
         syncRecentOrders(token)
     }
 
-    suspend fun syncInventory(token: String) {
-        require(token.isNotBlank()) {
-            "Discogs token is missing"
-        }
+    suspend fun syncInventory(token: String) =
+        inventorySyncMutex.withLock {
+            require(token.isNotBlank()) {
+                "Discogs token is missing"
+            }
 
-        val authHeader = "Discogs token=$token"
-        val identity =
-            RetrofitClient.apiService.getIdentity(authHeader)
+            val authHeader = "Discogs token=$token"
+            val identity =
+                RetrofitClient.apiService.getIdentity(authHeader)
 
-        val existingById =
-            dao.getInventorySnapshot()
-                .associateBy { it.listingId }
+            val existingById =
+                dao.getInventorySnapshot()
+                    .associateBy { it.listingId }
 
-        val syncStartedAt = System.currentTimeMillis()
-        var page = 1
-        var totalPages = 1
-        var syncedCount = 0
+            val syncStartedAt = System.currentTimeMillis()
+            var page = 1
+            var totalPages = 1
+            var syncedCount = 0
+            val completeSnapshot =
+                mutableListOf<LocalInventoryListingEntity>()
 
-        do {
-            val response =
-                RetrofitClient.apiService.getInventory(
-                    username = identity.username,
-                    authHeader = authHeader,
-                    status = "For Sale",
-                    sort = "listed",
-                    sortOrder = "asc",
-                    page = page,
-                    perPage = 100
-                )
-
-            totalPages = response.pagination.pages.coerceAtLeast(1)
-
-            val mapped =
-                response.listings.map { listing ->
-                    val existing = existingById[listing.id]
-                    val postedRaw =
-                        listing.posted
-                            ?: listing.dateAdded
-
-                    val parsedListedAt =
-                        parseDiscogsDate(postedRaw)
-
-                    val firstSeen =
-                        existing?.firstSeenAtEpochMs
-                            ?: syncStartedAt
-
-                    LocalInventoryListingEntity(
-                        listingId = listing.id,
-                        releaseId = listing.release.id,
-                        artist = listing.release.artist,
-                        title = listing.release.title
-                            .ifBlank {
-                                listing.release.description
-                            },
-                        thumbnail = listing.release.thumbnail,
-                        status = listing.status,
-                        mediaCondition = listing.condition,
-                        sleeveCondition = listing.sleeve_condition,
-                        comments = listing.comments,
-                        priceValue = listing.price?.value,
-                        currency = listing.price?.currency ?: "USD",
-                        postedRaw = postedRaw,
-                        listedAtEpochMs =
-                            parsedListedAt
-                                ?: existing?.listedAtEpochMs
-                                ?: firstSeen,
-                        listedDateIsExact =
-                            parsedListedAt != null ||
-                                existing?.listedDateIsExact == true,
-                        firstSeenAtEpochMs = firstSeen,
-                        lastSeenAtEpochMs = syncStartedAt
+            do {
+                val response =
+                    RetrofitClient.apiService.getInventory(
+                        username = identity.username,
+                        authHeader = authHeader,
+                        status = "For Sale",
+                        sort = "listed",
+                        sortOrder = "asc",
+                        page = page,
+                        perPage = 100
                     )
-                }
 
-            dao.upsertInventory(mapped)
-            syncedCount += mapped.size
-            page++
-        } while (page <= totalPages)
+                totalPages = response.pagination.pages.coerceAtLeast(1)
 
-        dao.deleteInventoryNotSeenInSync(syncStartedAt)
-        dao.upsertSyncState(
-            LocalSyncStateEntity(
-                key = INVENTORY_SYNC_KEY,
-                lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
-                itemCount = syncedCount,
-                note = "Active For Sale inventory"
+                val mapped =
+                    response.listings.map { listing ->
+                        val existing = existingById[listing.id]
+                        // Discogs now exposes more than one useful listing-date
+                        // field. `posted` can move forward when inventory is expired
+                        // and relisted, while `date_added` is the better candidate for
+                        // the original age of the listing when Discogs provides it.
+                        // Parse every date we have and keep the oldest valid one.
+                        val currentDateAddedAt =
+                            parseDiscogsDate(listing.dateAdded)
+                        val currentPostedAt =
+                            parseDiscogsDate(listing.posted)
+                        val previousRawAt =
+                            parseDiscogsDate(existing?.postedRaw)
+
+                        val firstSeen =
+                            existing?.firstSeenAtEpochMs
+                                ?: syncStartedAt
+
+                        val exactCandidates =
+                            listOfNotNull(
+                                currentDateAddedAt,
+                                currentPostedAt,
+                                previousRawAt,
+                                existing
+                                    ?.takeIf { it.listedDateIsExact }
+                                    ?.listedAtEpochMs
+                                    ?.takeIf { it > 0L }
+                            )
+
+                        val earliestExactListedAt =
+                            exactCandidates.minOrNull()
+
+                        // Never let a refresh make an item younger. If Discogs does
+                        // not expose any exact date, retain the earliest local date we
+                        // already know. This cannot reconstruct history that Discogs
+                        // never returned, but it prevents future relists from erasing
+                        // age again.
+                        val earliestKnownListedAt =
+                            listOfNotNull(
+                                earliestExactListedAt,
+                                existing?.listedAtEpochMs
+                                    ?.takeIf { it > 0L },
+                                firstSeen.takeIf { it > 0L }
+                            ).minOrNull()
+                                ?: syncStartedAt
+
+                        val listedDateIsExact =
+                            earliestExactListedAt != null &&
+                                    earliestExactListedAt == earliestKnownListedAt
+
+                        // Preserve the raw string that corresponds to the oldest
+                        // Discogs-provided timestamp when possible. This gives later
+                        // parser improvements another chance to recover the real date.
+                        val postedRaw =
+                            listOfNotNull(
+                                listing.dateAdded,
+                                listing.posted,
+                                existing?.postedRaw
+                            ).minByOrNull { raw ->
+                                parseDiscogsDate(raw)
+                                    ?: Long.MAX_VALUE
+                            }
+
+                        LocalInventoryListingEntity(
+                            listingId = listing.id,
+                            releaseId = listing.release.id,
+                            artist = listing.release.artist,
+                            title = listing.release.title
+                                .ifBlank {
+                                    listing.release.description
+                                },
+                            thumbnail = listing.release.thumbnail,
+                            status = listing.status,
+                            mediaCondition = listing.condition,
+                            sleeveCondition = listing.sleeve_condition,
+                            comments = listing.comments,
+                            priceValue = listing.price?.value,
+                            currency = listing.price?.currency ?: "USD",
+                            postedRaw = postedRaw,
+                            listedAtEpochMs = earliestKnownListedAt,
+                            listedDateIsExact = listedDateIsExact,
+                            firstSeenAtEpochMs = firstSeen,
+                            lastSeenAtEpochMs = syncStartedAt
+                        )
+                    }
+
+                completeSnapshot.addAll(mapped)
+                syncedCount += mapped.size
+                page++
+            } while (page <= totalPages)
+
+            // Publish the complete inventory snapshot atomically only after every
+            // network page has succeeded. A failed/partial sync leaves the previous
+            // valid local snapshot untouched.
+            dao.replaceInventorySnapshot(
+                listings = completeSnapshot,
+                syncStartedAtEpochMs = syncStartedAt
             )
-        )
-    }
+
+            dao.upsertSyncState(
+                LocalSyncStateEntity(
+                    key = INVENTORY_SYNC_KEY,
+                    lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
+                    itemCount = syncedCount,
+                    note = "Active For Sale inventory"
+                )
+            )
+        }
 
     suspend fun syncRecentOrders(
         token: String,
@@ -300,6 +357,8 @@ class SellerLocalRepository(context: Context) {
     }
 
     companion object {
+        private val inventorySyncMutex = Mutex()
+
         const val INVENTORY_SYNC_KEY = "inventory"
         const val ORDERS_SYNC_KEY = "orders"
 
@@ -308,10 +367,22 @@ class SellerLocalRepository(context: Context) {
                 return null
             }
 
+            // Discogs normally returns ISO-8601 offsets such as
+            // 2017-02-07T23:43:01-08:00. Be tolerant of fractional seconds
+            // longer than milliseconds and of offsets without the colon.
+            val normalized =
+                value.trim().replace(
+                    Regex("(\\.\\d{3})\\d+(?=Z$|[+-]\\d{2}:?\\d{2}$)"),
+                    "$1"
+                )
+
             val formats =
                 listOf(
-                    "yyyy-MM-dd'T'HH:mm:ssXXX",
                     "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                    "yyyy-MM-dd'T'HH:mm:ssXXX",
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+                    "yyyy-MM-dd'T'HH:mm:ssZ",
+                    "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
                     "yyyy-MM-dd'T'HH:mm:ss'Z'",
                     "yyyy-MM-dd HH:mm:ss",
                     "yyyy-MM-dd"
@@ -327,7 +398,7 @@ class SellerLocalRepository(context: Context) {
                             isLenient = false
                             timeZone =
                                 TimeZone.getTimeZone("UTC")
-                        }.parse(value)?.time
+                        }.parse(normalized)?.time
                     }.getOrNull()
 
                 if (parsed != null) {

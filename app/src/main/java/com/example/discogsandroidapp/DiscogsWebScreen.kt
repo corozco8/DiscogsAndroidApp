@@ -15,6 +15,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +33,17 @@ fun DiscogsWebScreen(
 ) {
     var webView by remember {
         mutableStateOf<WebView?>(null)
+    }
+
+    DisposableEffect(url) {
+        onDispose {
+            webView?.apply {
+                stopLoading()
+                webViewClient = WebViewClient()
+                destroy()
+            }
+            webView = null
+        }
     }
 
     BackHandler {
@@ -133,6 +145,9 @@ fun DiscogsWebScreen(
             },
             update = { view ->
                 webView = view
+                if (view.url != url) {
+                    view.loadUrl(url)
+                }
             }
         )
     }

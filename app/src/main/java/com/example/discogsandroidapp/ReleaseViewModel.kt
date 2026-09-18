@@ -125,12 +125,28 @@ class ReleaseViewModel : ViewModel() {
     private var currentUsername: String = ""
     private var currentReleaseId: Long? = null   // Store the release ID for suggestions
 
+    // Search and release-detail requests share navigation state. A slower old
+    // request must never overwrite a screen the user opened afterward.
+    private var navigationRequestJob: Job? = null
+    private var navigationRequestGeneration: Long = 0L
+
+    // Order-message state is shared by the visible order-detail screen, so
+    // protect it with both cancellation and order/request identity checks.
+    private var orderMessagesJob: Job? = null
+    private var orderMessagesGeneration: Long = 0L
+    private var activeOrderMessagesOrderId: String? = null
+
     private var sellerInboxJob: Job? = null
     private var sellerInboxGeneration: Long = 0L
 
     private var releaseBeforeMasterVersions:
             ReleaseUiState.ReleaseSuccess? = null
 
+    private fun invalidateNavigationRequests() {
+        navigationRequestGeneration++
+        navigationRequestJob?.cancel()
+        navigationRequestJob = null
+    }
 
 
     // ------------------------------------------------------------
@@ -138,14 +154,65 @@ class ReleaseViewModel : ViewModel() {
     // ------------------------------------------------------------
 
     fun navigateToOrders(token: String) {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.OrdersLoading
         fetchOrders(token)
+    }
+
+    private suspend fun enrichOrderWithListingDates(
+        order: DiscogsOrder,
+        token: String
+    ): DiscogsOrder = supervisorScope {
+        val authHeader = "Discogs token=$token"
+
+        val enrichedItems = order.items
+            .orEmpty()
+            .map { item ->
+                async {
+                    // Order payloads do not always include the original
+                    // marketplace posted timestamp. Fetch the listing only
+                    // when that date is missing.
+                    if (
+                        !item.posted.isNullOrBlank() ||
+                        !item.date_added.isNullOrBlank() ||
+                        item.id == null
+                    ) {
+                        return@async item
+                    }
+
+                    try {
+                        val listing =
+                            RetrofitClient.apiService.getMarketplaceListing(
+                                listingId = item.id,
+                                authHeader = authHeader
+                            )
+
+                        item.copy(
+                            posted = listing.posted ?: item.posted,
+                            date_added = listing.dateAdded ?: item.date_added
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(
+                            "ORDER_DETAILS",
+                            "Could not load listing date for listing ${item.id}",
+                            e
+                        )
+                        item
+                    }
+                }
+            }
+            .awaitAll()
+
+        order.copy(items = enrichedItems)
     }
 
     fun navigateToOrderDetails(
         order: DiscogsOrder,
         token: String
     ) {
+        invalidateNavigationRequests()
         // Show the row data immediately, then replace it with the complete
         // order resource so shipping address, instructions, fees and
         // next_status are authoritative.
@@ -168,13 +235,19 @@ class ReleaseViewModel : ViewModel() {
                             authHeader = "Discogs token=$token"
                         )
 
+                    val enrichedOrder =
+                        enrichOrderWithListingDates(
+                            order = fullOrder,
+                            token = token
+                        )
+
                     val current =
                         _uiState.value as? ReleaseUiState.OrderDetails
 
                     if (current?.order?.id == orderId) {
                         _uiState.value =
                             ReleaseUiState.OrderDetails(
-                                fullOrder
+                                enrichedOrder
                             )
                     }
                 } catch (e: Exception) {
@@ -196,10 +269,12 @@ class ReleaseViewModel : ViewModel() {
     }
 
     fun navigateToAiSearch() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.AiSearch
     }
 
     fun openSellerInbox(token: String) {
+        invalidateNavigationRequests()
         sellerInboxGeneration++
         val generation = sellerInboxGeneration
 
@@ -385,6 +460,7 @@ class ReleaseViewModel : ViewModel() {
     fun openDiscogsInbox(
         returnToSellerInbox: Boolean = false
     ) {
+        invalidateNavigationRequests()
         _uiState.value =
             ReleaseUiState.DiscogsWebView(
                 title = "Private Inbox",
@@ -397,6 +473,7 @@ class ReleaseViewModel : ViewModel() {
     fun openBuyerFeedback(
         order: DiscogsOrder
     ) {
+        invalidateNavigationRequests()
         val orderId = order.id ?: return
 
         _uiState.value =
@@ -507,6 +584,12 @@ class ReleaseViewModel : ViewModel() {
                         authHeader = authHeader
                     )
 
+                val enrichedUpdatedOrder =
+                    enrichOrderWithListingDates(
+                        order = updatedOrder,
+                        token = token
+                    )
+
                 if (
                     !updatedOrder.status.equals(
                         newStatus,
@@ -522,7 +605,7 @@ class ReleaseViewModel : ViewModel() {
 
                 _uiState.value =
                     ReleaseUiState.OrderDetails(
-                        updatedOrder
+                        enrichedUpdatedOrder
                     )
 
                 loadOrderMessages(
@@ -552,22 +635,27 @@ class ReleaseViewModel : ViewModel() {
     }
 
     fun navigateToInventory() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.Inventory
     }
 
     fun navigateToOffers() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.Offers
     }
 
     fun navigateToInventoryAging() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.InventoryAging
     }
 
     fun navigateToSalesAnalytics() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.SalesAnalytics
     }
 
     fun navigateToCustomerHistory() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.CustomerHistory
     }
 
@@ -592,6 +680,7 @@ class ReleaseViewModel : ViewModel() {
 
     private var currentPage = 1
     private var totalPages = 1
+    private var currentStoreTotalItems = 0
     private var isFetchingNextPage = false
     private val currentListings = mutableListOf<InventoryListing>()
 
@@ -608,6 +697,7 @@ class ReleaseViewModel : ViewModel() {
         sortOrder: String = "desc",
         reset: Boolean = true
     ) {
+        invalidateNavigationRequests()
         if (currentUsername.isEmpty()) return
         if (!reset && isFetchingNextPage) return
 
@@ -684,6 +774,7 @@ class ReleaseViewModel : ViewModel() {
                 // Only commit pagination progress after a successful response.
                 currentPage = requestedPage
                 totalPages = response.pagination.pages
+                currentStoreTotalItems = response.pagination.items
 
                 _uiState.value =
                     ReleaseUiState.StoreSuccess(
@@ -757,6 +848,31 @@ class ReleaseViewModel : ViewModel() {
         )
     }
 
+    fun restoreStoreInventory(token: String) {
+        invalidateNavigationRequests()
+        storeFetchJob?.cancel()
+        isFetchingNextPage = false
+
+        if (currentListings.isNotEmpty()) {
+            _uiState.value =
+                ReleaseUiState.StoreSuccess(
+                    listings = currentListings.toList(),
+                    totalItems =
+                        currentStoreTotalItems
+                            .takeIf { it > 0 }
+                            ?: currentListings.size,
+                    isFetchingMore = false
+                )
+        } else {
+            fetchStoreInventory(
+                token = token,
+                sort = currentSort,
+                sortOrder = currentSortOrder,
+                reset = true
+            )
+        }
+    }
+
     fun loadNextPage(token: String) {
         if (
             currentPage < totalPages &&
@@ -775,63 +891,131 @@ class ReleaseViewModel : ViewModel() {
 
     fun search(query: String, token: String) {
         if (query.isBlank()) return
-        viewModelScope.launch {
+
+        navigationRequestGeneration++
+        val generation = navigationRequestGeneration
+        navigationRequestJob?.cancel()
+
+        navigationRequestJob = viewModelScope.launch {
             _uiState.value = ReleaseUiState.Loading
+
             try {
                 val authHeader = "Discogs token=$token"
                 val response =
-                    RetrofitClient.apiService.searchDatabase(query = query, authHeader = authHeader)
-                _uiState.value = ReleaseUiState.SearchSuccess(response.results)
+                    RetrofitClient.apiService.searchDatabase(
+                        query = query,
+                        authHeader = authHeader
+                    )
+
+                if (generation == navigationRequestGeneration) {
+                    _uiState.value =
+                        ReleaseUiState.SearchSuccess(response.results)
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _uiState.value = ReleaseUiState.Error(e.localizedMessage ?: "Search failed")
+                if (generation == navigationRequestGeneration) {
+                    _uiState.value =
+                        ReleaseUiState.Error(
+                            e.localizedMessage ?: "Search failed"
+                        )
+                }
             }
         }
     }
 
     fun fetchRelease(releaseId: Long, token: String) {
-        viewModelScope.launch {
+        navigationRequestGeneration++
+        val generation = navigationRequestGeneration
+        navigationRequestJob?.cancel()
+
+        navigationRequestJob = viewModelScope.launch {
             _uiState.value = ReleaseUiState.Loading
+
             try {
                 val authHeader = "Discogs token=$token"
-
-                // Store releaseId for later suggestions
                 currentReleaseId = releaseId
 
-                // 1. Main Release Details
                 val releaseResponse = RetrofitClient.apiService.getRelease(
                     releaseId = releaseId,
                     authHeader = authHeader
                 )
 
-                // 2. Marketplace Stats
-                var numForSale = 0
-                var lowestPrice: Double? = null
-                var debugMsg = "No Data"
-
-                try {
-                    val stats = RetrofitClient.apiService.getMarketplaceStats(
-                        releaseId = releaseId,
-                        authHeader = authHeader
-                    )
-                    numForSale = stats.numForSale ?: 0
-                    lowestPrice = stats.lowestPrice?.value
-                } catch (e: Exception) {
-                    Log.e("DiscogsDebug", "Marketplace Stats Failed!", e)
-                    debugMsg = "StatsErr: ${e.javaClass.simpleName}"
+                if (generation != navigationRequestGeneration) {
+                    return@launch
                 }
 
-                // 3. Price Suggestions
-                var suggestions: PriceSuggestions? = null
-                try {
-                    suggestions = RetrofitClient.apiService.getPriceSuggestions(
-                        releaseId = releaseId,
-                        authHeader = authHeader
-                    )
-                } catch (e: Exception) {
-                    Log.e("DiscogsDebug", "Price Suggestions Failed!", e)
-                    val priceErr = "PriceErr: ${e.javaClass.simpleName}"
-                    debugMsg = if (debugMsg == "No Data") priceErr else "$debugMsg | $priceErr"
+                // Show Release Details immediately. Its marketplace WebView can
+                // begin warming while stats and suggestions load in parallel.
+                _uiState.value = ReleaseUiState.ReleaseSuccess(
+                    release = releaseResponse,
+                    priceSummary = null
+                )
+
+                data class StatsResult(
+                    val numForSale: Int,
+                    val lowestPrice: Double?,
+                    val error: String? = null
+                )
+
+                val (statsResult, suggestionsResult) = supervisorScope {
+                    val statsDeferred = async {
+                        try {
+                            val stats = RetrofitClient.apiService.getMarketplaceStats(
+                                releaseId = releaseId,
+                                authHeader = authHeader
+                            )
+                            StatsResult(
+                                numForSale = stats.numForSale ?: 0,
+                                lowestPrice = stats.lowestPrice?.value
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e("DiscogsDebug", "Marketplace Stats Failed!", e)
+                            StatsResult(
+                                numForSale = 0,
+                                lowestPrice = null,
+                                error = "StatsErr: ${e.javaClass.simpleName}"
+                            )
+                        }
+                    }
+
+                    val suggestionsDeferred = async {
+                        try {
+                            Pair(
+                                RetrofitClient.apiService.getPriceSuggestions(
+                                    releaseId = releaseId,
+                                    authHeader = authHeader
+                                ),
+                                null as String?
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e("DiscogsDebug", "Price Suggestions Failed!", e)
+                            Pair(
+                                null,
+                                "PriceErr: ${e.javaClass.simpleName}"
+                            )
+                        }
+                    }
+
+                    statsDeferred.await() to suggestionsDeferred.await()
                 }
+
+                if (generation != navigationRequestGeneration) {
+                    return@launch
+                }
+
+                val suggestions = suggestionsResult.first
+                val debugMsg =
+                    listOfNotNull(
+                        statsResult.error,
+                        suggestionsResult.second
+                    ).takeIf { it.isNotEmpty() }
+                        ?.joinToString(" | ")
+                        ?: "No Data"
 
                 val summary = ReleasePriceSummary(
                     low = suggestions?.low,
@@ -839,8 +1023,8 @@ class ReleaseViewModel : ViewModel() {
                     high = suggestions?.high,
                     currency = "USD",
                     lastSold = debugMsg,
-                    numForSale = numForSale,
-                    lowestAskingPrice = lowestPrice,
+                    numForSale = statsResult.numForSale,
+                    lowestAskingPrice = statsResult.lowestPrice,
                     priceSuggestions = suggestions
                 )
 
@@ -848,8 +1032,14 @@ class ReleaseViewModel : ViewModel() {
                     release = releaseResponse,
                     priceSummary = summary
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _uiState.value = ReleaseUiState.Error(e.localizedMessage ?: "Failed to fetch details")
+                if (generation == navigationRequestGeneration) {
+                    _uiState.value = ReleaseUiState.Error(
+                        e.localizedMessage ?: "Failed to fetch details"
+                    )
+                }
             }
         }
     }
@@ -858,6 +1048,7 @@ class ReleaseViewModel : ViewModel() {
         masterId: Long,
         token: String
     ) {
+        invalidateNavigationRequests()
         val currentState = _uiState.value
 
         if (currentState is ReleaseUiState.ReleaseSuccess) {
@@ -988,16 +1179,21 @@ class ReleaseViewModel : ViewModel() {
                 aiCacheRefreshRequested = false
 
                 try {
+                    val revisionAtStart =
+                        AiCacheSyncTracker.captureRevision()
+
                     BackendRetrofitClient.apiService
                         .syncInventory()
 
-                    // Only call the cache fully current when no newer
-                    // mutation arrived while this download was in flight.
-                    // If another invalidation is pending, keep the dirty bit
-                    // set until the follow-up refresh finishes.
-                    if (!aiCacheRefreshRequested) {
-                        AiCacheSyncTracker
-                            .markFullSyncComplete()
+                    AiCacheSyncTracker
+                        .markFullSyncComplete(revisionAtStart)
+
+                    // A mutation that happened during the download remains
+                    // dirty because it has a newer revision. Ensure it gets a
+                    // follow-up refresh even if a caller forgot to set the
+                    // local requested flag.
+                    if (AiCacheSyncTracker.needsFullSync()) {
+                        aiCacheRefreshRequested = true
                     }
                 } catch (cacheError: Exception) {
                     AiCacheSyncTracker.markDirty()
@@ -1050,11 +1246,14 @@ class ReleaseViewModel : ViewModel() {
                 // The row may be missing OR an earlier mutation may have
                 // failed to reach the cache. A full synchronization is the
                 // only safe point at which AI results can be called current.
+                val revisionAtStart =
+                    AiCacheSyncTracker.captureRevision()
+
                 BackendRetrofitClient.apiService
                     .syncInventory()
 
                 AiCacheSyncTracker
-                    .markFullSyncComplete()
+                    .markFullSyncComplete(revisionAtStart)
 
                 true
             }
@@ -1487,6 +1686,7 @@ class ReleaseViewModel : ViewModel() {
     }
 
     fun resetToIdle() {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.Idle
     }
 
@@ -1503,6 +1703,7 @@ class ReleaseViewModel : ViewModel() {
     private var ordersRequestGeneration = 0
 
     fun fetchOrders(token: String) {
+        invalidateNavigationRequests()
         currentOrdersStatus = "Payment Received"
         currentOrdersSortOrder = "asc"
 
@@ -1516,6 +1717,7 @@ class ReleaseViewModel : ViewModel() {
         status: String,
         token: String
     ) {
+        invalidateNavigationRequests()
         currentOrdersStatus =
             if (status == "All Orders") {
                 "All"
@@ -1691,7 +1893,12 @@ class ReleaseViewModel : ViewModel() {
         orderId: String,
         token: String
     ) {
-        viewModelScope.launch {
+        orderMessagesGeneration++
+        val generation = orderMessagesGeneration
+        activeOrderMessagesOrderId = orderId
+        orderMessagesJob?.cancel()
+
+        orderMessagesJob = viewModelScope.launch {
             _orderMessagesUiState.value =
                 OrderMessagesUiState.Loading
 
@@ -1707,6 +1914,13 @@ class ReleaseViewModel : ViewModel() {
                             page = 1,
                             perPage = 100
                         )
+
+                if (
+                    generation != orderMessagesGeneration ||
+                    activeOrderMessagesOrderId != orderId
+                ) {
+                    return@launch
+                }
 
                 val allMessages =
                     firstPage.messages.toMutableList()
@@ -1725,17 +1939,31 @@ class ReleaseViewModel : ViewModel() {
                                     perPage = 100
                                 )
 
+                        if (
+                            generation != orderMessagesGeneration ||
+                            activeOrderMessagesOrderId != orderId
+                        ) {
+                            return@launch
+                        }
+
                         allMessages.addAll(
                             response.messages
                         )
                     }
                 }
 
-                _orderMessagesUiState.value =
-                    OrderMessagesUiState.Success(
-                        messages = allMessages
-                    )
+                if (
+                    generation == orderMessagesGeneration &&
+                    activeOrderMessagesOrderId == orderId
+                ) {
+                    _orderMessagesUiState.value =
+                        OrderMessagesUiState.Success(
+                            messages = allMessages
+                        )
+                }
 
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(
                     "ORDER_MESSAGES",
@@ -1743,11 +1971,16 @@ class ReleaseViewModel : ViewModel() {
                     e
                 )
 
-                _orderMessagesUiState.value =
-                    OrderMessagesUiState.Error(
-                        e.localizedMessage
-                            ?: "Failed to load messages"
-                    )
+                if (
+                    generation == orderMessagesGeneration &&
+                    activeOrderMessagesOrderId == orderId
+                ) {
+                    _orderMessagesUiState.value =
+                        OrderMessagesUiState.Error(
+                            e.localizedMessage
+                                ?: "Failed to load messages"
+                        )
+                }
             }
         }
     }
@@ -1755,11 +1988,13 @@ class ReleaseViewModel : ViewModel() {
     fun sendOrderMessage(
         orderId: String,
         message: String,
-        token: String
+        token: String,
+        onResult: (Boolean) -> Unit = {}
     ) {
         val cleanMessage = message.trim()
 
         if (cleanMessage.isEmpty()) {
+            onResult(false)
             return
         }
 
@@ -1777,13 +2012,19 @@ class ReleaseViewModel : ViewModel() {
                         )
                     )
 
-                // Reload the conversation so the new message
-                // appears exactly as Discogs stored it.
-                loadOrderMessages(
-                    orderId = orderId,
-                    token = token
-                )
+                onResult(true)
 
+                // Only refresh the conversation if this order is still the
+                // one represented by the shared message state.
+                if (activeOrderMessagesOrderId == orderId) {
+                    loadOrderMessages(
+                        orderId = orderId,
+                        token = token
+                    )
+                }
+
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(
                     "ORDER_MESSAGES",
@@ -1791,16 +2032,21 @@ class ReleaseViewModel : ViewModel() {
                     e
                 )
 
-                _orderMessagesUiState.value =
-                    OrderMessagesUiState.Error(
-                        e.localizedMessage
-                            ?: "Failed to send message"
-                    )
+                if (activeOrderMessagesOrderId == orderId) {
+                    _orderMessagesUiState.value =
+                        OrderMessagesUiState.Error(
+                            e.localizedMessage
+                                ?: "Failed to send message"
+                        )
+                }
+
+                onResult(false)
             }
         }
     }
 
     fun openRatings(username: String, ratingType: String) {
+        invalidateNavigationRequests()
         _uiState.value = ReleaseUiState.RatingsWebView(username, ratingType)
     }
 

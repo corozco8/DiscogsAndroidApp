@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -22,6 +23,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -31,11 +34,34 @@ fun OrderDetailScreen(
     onBackClick: () -> Unit,
     onStatusChange: (String) -> Unit,
     onItemClick: (Int) -> Unit,
-    onSendMessage: (String) -> Unit,
+    onSendMessage: (String, (Boolean) -> Unit) -> Unit,
     onLeaveBuyerFeedback: () -> Unit
 ) {
     var messageText by remember(order.id) {
         mutableStateOf("")
+    }
+    var isSendingMessage by remember(order.id) {
+        mutableStateOf(false)
+    }
+
+    fun submitMessage() {
+        val submittedMessage = messageText.trim()
+
+        if (submittedMessage.isEmpty() || isSendingMessage) {
+            return
+        }
+
+        isSendingMessage = true
+
+        onSendMessage(submittedMessage) { success ->
+            if (
+                success &&
+                messageText.trim() == submittedMessage
+            ) {
+                messageText = ""
+            }
+            isSendingMessage = false
+        }
     }
     Scaffold(
         topBar = {
@@ -54,50 +80,72 @@ fun OrderDetailScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Order Header Info
+            // Compact order summary
             item {
-                Row(
+                ElevatedCard(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+                    colors = CardDefaults.elevatedCardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
                 ) {
-                    val safeItems = order.items ?: emptyList()
-                    val itemWord = if (safeItems.size == 1) "item" else "items"
-                    Text(
-                        text = "${safeItems.size} $itemWord",
-                        fontSize = 16.sp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
                     ) {
-                        Text(
-                            text = (order.status ?: "Unknown").uppercase(),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Created: ${formatOrderTimestamp(order.created)}",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val safeItems = order.items.orEmpty()
+                            val itemWord = if (safeItems.size == 1) "item" else "items"
 
-                if (!order.lastActivity.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Last activity: ${formatOrderTimestamp(order.lastActivity)}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                            Text(
+                                text = "${safeItems.size} $itemWord",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Text(
+                                    text = (order.status ?: "Unknown").uppercase(),
+                                    modifier = Modifier.padding(
+                                        horizontal = 8.dp,
+                                        vertical = 3.dp
+                                    ),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "Created ${formatOrderTimestamp(order.created)}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        if (!order.lastActivity.isNullOrBlank()) {
+                            Text(
+                                text = "Last activity ${formatOrderTimestamp(order.lastActivity)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -109,16 +157,19 @@ fun OrderDetailScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 items(items) { item ->
-                    Card(
+                    ElevatedCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                // Trigger the network call when tapped!
                                 item.release?.id?.let { releaseId ->
                                     onItemClick(releaseId.toInt())
                                 }
                             },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        shape = RoundedCornerShape(16.dp),
+                        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+                        colors = CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
                     ) {
                         Row(
                             modifier = Modifier.padding(12.dp),
@@ -128,83 +179,108 @@ fun OrderDetailScreen(
                                 model = item.release?.thumbnail
                                     ?: "https://via.placeholder.com/150",
                                 contentDescription = "Thumbnail",
-                                modifier = Modifier.size(60.dp)
+                                modifier = Modifier
+                                    .size(64.dp)
                             )
+
                             Spacer(modifier = Modifier.width(12.dp))
 
-                            // UPDATED: Expanded Column to hold conditions and dates
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = item.release?.description ?: item.release?.title
-                                    ?: "Unknown Item",
+                                    text = item.release?.description
+                                        ?: item.release?.title
+                                        ?: "Unknown Item",
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
 
-                                // Grades & ID
+                                Spacer(modifier = Modifier.height(5.dp))
+
                                 val recordGrade = item.media_condition ?: item.condition
-                                recordGrade?.let {
+                                val sleeveGrade = item.sleeve_condition
+                                val conditionText = buildString {
+                                    if (!recordGrade.isNullOrBlank()) {
+                                        append("Media: ")
+                                        append(recordGrade)
+                                    }
+                                    if (!sleeveGrade.isNullOrBlank()) {
+                                        if (isNotEmpty()) append("  •  ")
+                                        append("Sleeve: ")
+                                        append(sleeveGrade)
+                                    }
+                                }
+
+                                if (conditionText.isNotBlank()) {
                                     Text(
-                                        text = "Media: $it",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        text = conditionText,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
 
-                                item.sleeve_condition?.let {
+                                val dateListed = item.posted ?: item.date_added
+                                dateListed?.let { rawDate ->
+                                    val compactDate = rawDate.take(10)
+                                    val displayDate =
+                                        try {
+                                            val parsed =
+                                                SimpleDateFormat(
+                                                    "yyyy-MM-dd",
+                                                    Locale.US
+                                                ).parse(compactDate)
+
+                                            if (parsed != null) {
+                                                SimpleDateFormat(
+                                                    "MMM d, yyyy",
+                                                    Locale.US
+                                                ).format(parsed)
+                                            } else {
+                                                compactDate
+                                            }
+                                        } catch (_: Exception) {
+                                            compactDate
+                                        }
+
                                     Text(
-                                        text = "Sleeve: $it",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        text = "Listed $displayDate",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        modifier = Modifier.padding(top = 2.dp)
                                     )
                                 }
 
                                 item.comments
                                     ?.takeIf { it.isNotBlank() }
                                     ?.let { comments ->
-                                        Spacer(
-                                            modifier = Modifier.height(4.dp)
-                                        )
                                         Text(
-                                            text = "Comments: $comments",
-                                            fontSize = 12.sp,
-                                            lineHeight = 17.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = comments,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 2.dp)
                                         )
                                     }
-
-                                Text(
-                                    text = "ID: ${item.id ?: "N/A"}",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-
-                                // Date Listed
-                                val dateListed = item.posted ?: item.date_added
-                                dateListed?.let { date ->
-                                    val displayDate = if (date.length >= 10) date.take(10) else date
-                                    Text(
-                                        text = "Listed: $displayDate",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.outline
-                                    )
-                                }
-
 
                                 val currency = item.price?.currency ?: "$"
                                 val priceVal = item.price?.value ?: 0.00
                                 val formattedItemPrice = String.format(
                                     java.util.Locale.getDefault(),
-                                    "%s %.2f",
+                                    "%s %,.2f",
                                     currency,
                                     priceVal
                                 )
 
                                 Text(
                                     text = formattedItemPrice,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 4.dp)
                                 )
                             }
                         }
@@ -556,13 +632,7 @@ fun OrderDetailScreen(
                                 ),
                                 keyboardActions = KeyboardActions(
                                     onSend = {
-                                        val message =
-                                            messageText.trim()
-
-                                        if (message.isNotEmpty()) {
-                                            onSendMessage(message)
-                                            messageText = ""
-                                        }
+                                        submitMessage()
                                     }
                                 )
                             )
@@ -576,19 +646,26 @@ fun OrderDetailScreen(
                                 horizontalArrangement = Arrangement.End
                             ) {
                                 Button(
-                                    onClick = {
-                                        val message =
-                                            messageText.trim()
-
-                                        if (message.isNotEmpty()) {
-                                            onSendMessage(message)
-                                            messageText = ""
-                                        }
-                                    },
-                                    enabled = messageText.isNotBlank(),
+                                    onClick = { submitMessage() },
+                                    enabled =
+                                        messageText.isNotBlank() &&
+                                            !isSendingMessage,
                                     shape = RoundedCornerShape(50)
                                 ) {
-                                    Text("Send")
+                                    if (isSendingMessage) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                    }
+                                    Text(
+                                        if (isSendingMessage) {
+                                            "Sending…"
+                                        } else {
+                                            "Send"
+                                        }
+                                    )
                                 }
                             }
                         }

@@ -1,29 +1,33 @@
 package com.example.discogsandroidapp
 
+import android.graphics.Bitmap
 import android.util.Log
 import android.webkit.WebView
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sell
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 @Composable
 fun MarketplaceListingsScreen(
@@ -31,67 +35,84 @@ fun MarketplaceListingsScreen(
     priceSummary: ReleasePriceSummary? = null,
     viewModel: ReleaseViewModel,
     token: String,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onSearchRequested: (String) -> Unit,
+    onBarcodeSearchRequested: (String) -> Unit
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
-    var searchText by remember { mutableStateOf("") }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var pageReady by remember { mutableStateOf(false) }
-    var effectivePriceSummary by remember(releaseId, priceSummary) {
-        mutableStateOf(priceSummary)
+    var marketplaceSearchQuery by remember(releaseId) { mutableStateOf("") }
+    var liveMarketplacePrices by remember(releaseId) {
+        mutableStateOf(getCachedMarketplaceConditionPrices(releaseId))
+    }
+    var marketplacePricingStatus by remember(releaseId) {
+        mutableStateOf(
+            if (liveMarketplacePrices != null) {
+                MarketplaceUiPriceStatus.CACHED
+            } else {
+                MarketplaceUiPriceStatus.LOADING
+            }
+        )
+    }
+    var effectivePriceSummary by remember(releaseId) {
+        mutableStateOf(
+            liveMarketplacePrices?.let { prices ->
+                (priceSummary ?: ReleasePriceSummary())
+                    .withActiveMarketplacePrices(prices)
+            } ?: priceSummary
+        )
+    }
+    var webViewRef by remember(releaseId) {
+        mutableStateOf<WebView?>(null)
     }
 
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val searchFocusRequester = remember { FocusRequester() }
-    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val scanner = remember { GmsBarcodeScanning.getClient(context) }
+    val webViewActive = remember(releaseId) { AtomicBoolean(true) }
+    val scanGeneration = remember(releaseId) { intArrayOf(0) }
 
-    // This screen already has the real marketplace page visible. Use that
-    // exact WebView as the price source instead of loading a second hidden
-    // copy of the page.
-    val accumulatedMediaLowest =
-        remember(releaseId) { mutableMapOf<String, Double>() }
-    val accumulatedMediaSleeveLowest =
-        remember(releaseId) { mutableMapOf<String, Double>() }
-
-    fun mergeMarketplacePrices(
+    fun applyMarketplacePrices(
         prices: ActiveMarketplaceConditionPrices
     ) {
-        prices.mediaLowest.forEach { (grade, value) ->
-            val previous = accumulatedMediaLowest[grade]
-            if (previous == null || value < previous) {
-                accumulatedMediaLowest[grade] = value
-            }
-        }
-
-        prices.mediaSleeveLowest.forEach { (key, value) ->
-            val previous = accumulatedMediaSleeveLowest[key]
-            if (previous == null || value < previous) {
-                accumulatedMediaSleeveLowest[key] = value
-            }
-        }
-
+        liveMarketplacePrices = prices
         effectivePriceSummary =
-            (effectivePriceSummary ?: priceSummary ?: ReleasePriceSummary())
-                .withActiveMarketplacePrices(
-                    ActiveMarketplaceConditionPrices(
-                        mediaLowest = accumulatedMediaLowest.toMap(),
-                        mediaSleeveLowest =
-                            accumulatedMediaSleeveLowest.toMap()
-                    )
-                )
+            (priceSummary ?: ReleasePriceSummary())
+                .withActiveMarketplacePrices(prices)
     }
 
-    // Filter the loaded Discogs listings as the user types. The underlying
-    // marketplace page remains permanently sorted lowest price first.
-    LaunchedEffect(searchText, pageReady) {
-        if (!pageReady) return@LaunchedEffect
-        delay(120)
-        webViewRef?.let { webView ->
-            applyMarketplaceListingFilter(
-                webView = webView,
-                query = searchText
-            )
+    LaunchedEffect(releaseId) {
+        getCachedMarketplacePriceSnapshot(releaseId)?.let { snapshot ->
+            liveMarketplacePrices = snapshot.prices
+            marketplacePricingStatus = MarketplaceUiPriceStatus.CACHED
+            effectivePriceSummary =
+                (priceSummary ?: ReleasePriceSummary())
+                    .withActiveMarketplacePrices(snapshot.prices)
+        }
+    }
+
+    // A late static price-summary response must not erase live marketplace
+    // prices already discovered for this release.
+    LaunchedEffect(priceSummary, releaseId, liveMarketplacePrices) {
+        effectivePriceSummary =
+            liveMarketplacePrices?.let { prices ->
+                (priceSummary ?: ReleasePriceSummary())
+                    .withActiveMarketplacePrices(prices)
+            } ?: priceSummary
+    }
+
+    DisposableEffect(releaseId) {
+        webViewActive.set(true)
+
+        onDispose {
+            webViewActive.set(false)
+            scanGeneration[0]++
+            webViewRef?.apply {
+                stopLoading()
+                webViewClient = WebViewClient()
+                destroy()
+            }
+            webViewRef = null
         }
     }
 
@@ -100,10 +121,14 @@ fun MarketplaceListingsScreen(
             color = MaterialTheme.colorScheme.surface,
             shadowElevation = 4.dp
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = onBackClick) {
                         Icon(
@@ -115,47 +140,61 @@ fun MarketplaceListingsScreen(
                     Text(
                         text = "Marketplace Listings",
                         style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(start = 8.dp)
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 4.dp)
                     )
+
+                    FilledTonalButton(
+                        onClick = { showSellDialog = true },
+                        contentPadding = PaddingValues(
+                            horizontal = 14.dp,
+                            vertical = 8.dp
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sell,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Sell")
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedTextField(
-                        value = searchText,
-                        onValueChange = { searchText = it },
-                        placeholder = { Text("Search listings...") },
+                        value = marketplaceSearchQuery,
+                        onValueChange = { marketplaceSearchQuery = it },
+                        placeholder = { Text("Search...") },
                         singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(searchFocusRequester),
-                        keyboardOptions = KeyboardOptions(
-                            imeAction = ImeAction.Search
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onSearch = { keyboardController?.hide() }
-                        ),
+                        modifier = Modifier.weight(1f),
                         leadingIcon = {
-                            Icon(
-                                Icons.Default.Search,
-                                contentDescription = null
-                            )
+                            IconButton(
+                                onClick = {
+                                    val query = marketplaceSearchQuery.trim()
+                                    if (query.isNotEmpty()) {
+                                        focusManager.clearFocus(force = true)
+                                        keyboardController?.hide()
+                                        onSearchRequested(query)
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.Search,
+                                    contentDescription = "Search"
+                                )
+                            }
                         },
                         trailingIcon = {
-                            if (searchText.isNotEmpty()) {
+                            if (marketplaceSearchQuery.isNotEmpty()) {
                                 IconButton(
-                                    onClick = {
-                                        searchText = ""
-                                        searchFocusRequester.requestFocus()
-                                        scope.launch {
-                                            delay(80)
-                                            keyboardController?.show()
-                                        }
-                                    }
+                                    onClick = { marketplaceSearchQuery = "" }
                                 ) {
                                     Icon(
                                         Icons.Default.Clear,
@@ -163,19 +202,44 @@ fun MarketplaceListingsScreen(
                                     )
                                 }
                             }
-                        }
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = ImeAction.Search
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                val query = marketplaceSearchQuery.trim()
+                                if (query.isNotEmpty()) {
+                                    focusManager.clearFocus(force = true)
+                                    keyboardController?.hide()
+                                    onSearchRequested(query)
+                                }
+                            }
+                        )
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     Button(
-                        onClick = { showSellDialog = true },
-                        contentPadding = PaddingValues(16.dp),
-                        modifier = Modifier.height(56.dp)
+                        onClick = {
+                            scanner.startScan()
+                                .addOnSuccessListener { barcode ->
+                                    barcode.rawValue
+                                        ?.trim()
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.let { scannedValue ->
+                                            marketplaceSearchQuery = scannedValue
+                                            focusManager.clearFocus(force = true)
+                                            keyboardController?.hide()
+                                            onBarcodeSearchRequested(scannedValue)
+                                        }
+                                }
+                        },
+                        contentPadding = PaddingValues(12.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Sell,
-                            contentDescription = "Sell a copy"
+                            Icons.Default.QrCodeScanner,
+                            contentDescription = "Scan Barcode"
                         )
                     }
                 }
@@ -188,42 +252,98 @@ fun MarketplaceListingsScreen(
                 WebView(androidContext).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+
                     webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(
+                            view: WebView,
+                            url: String?,
+                            favicon: Bitmap?
+                        ) {
+                            super.onPageStarted(view, url, favicon)
+                            // Invalidate callbacks scheduled by the previous page.
+                            scanGeneration[0]++
+                            marketplacePricingStatus =
+                                if (liveMarketplacePrices != null) {
+                                    MarketplaceUiPriceStatus.CACHED
+                                } else {
+                                    MarketplaceUiPriceStatus.LOADING
+                                }
+                            val navigationGeneration = scanGeneration[0]
+                            view.postDelayed(
+                                {
+                                    if (
+                                        webViewActive.get() &&
+                                        navigationGeneration == scanGeneration[0] &&
+                                        marketplacePricingStatus == MarketplaceUiPriceStatus.LOADING
+                                    ) {
+                                        marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
+                                    }
+                                },
+                                10_000L
+                            )
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            errorResponse: WebResourceResponse
+                        ) {
+                            super.onReceivedHttpError(view, request, errorResponse)
+                            if (request.isForMainFrame) {
+                                marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
+                            }
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            if (request.isForMainFrame) {
+                                marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
+                            }
+                        }
+
                         override fun onPageFinished(
                             view: WebView,
                             url: String
                         ) {
                             super.onPageFinished(view, url)
-                            pageReady = true
-                            applyMarketplaceListingFilter(
-                                webView = view,
-                                query = searchText
-                            )
 
-                            // Marketplace rows can appear after onPageFinished.
-                            // Sample this same visible page several times and
-                            // retain the lowest price seen for each media grade.
-                            listOf(
-                                0L,
-                                350L,
-                                800L,
-                                1600L,
-                                2800L,
-                                4500L
-                            ).forEach { delayMs ->
-                                view.postDelayed(
-                                    {
-                                        evaluateMarketplaceConditionPrices(
-                                            webView = view,
-                                            onPrices =
-                                                ::mergeMarketplacePrices
-                                        )
-                                    },
-                                    delayMs
-                                )
+
+                            // Never let navigation to another Discogs release
+                            // contaminate this screen's recommendation data.
+                            if (!marketplaceUrlBelongsToRelease(url, releaseId)) {
+                                return
                             }
+
+                            val generation = scanGeneration[0]
+
+                            beginMarketplacePriceScan(
+                                webView = view,
+                                releaseId = releaseId,
+                                isCurrent = {
+                                    webViewActive.get() &&
+                                            generation == scanGeneration[0] &&
+                                            marketplaceUrlBelongsToRelease(
+                                                view.url,
+                                                releaseId
+                                            )
+                                },
+                                onPrices = ::applyMarketplacePrices,
+                                onStatus = { status ->
+                                    if (
+                                        webViewActive.get() &&
+                                        generation == scanGeneration[0]
+                                    ) {
+                                        marketplacePricingStatus = status
+                                    }
+                                }
+                            )
                         }
                     }
+
                     loadUrl(marketplaceReleaseListingsUrl(releaseId))
                     webViewRef = this
                 }
@@ -237,7 +357,6 @@ fun MarketplaceListingsScreen(
     if (showSellDialog) {
         AddListingDialog(
             priceSummary = effectivePriceSummary ?: priceSummary,
-            releaseId = releaseId,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeveCondition, comments ->
                 Log.d(

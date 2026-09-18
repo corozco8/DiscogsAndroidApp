@@ -110,49 +110,77 @@ data class ReleasePriceSummary(
     val activeMediaSleeveLowestPrices: Map<String, Double> = emptyMap()
 ) {
     /**
-     * Lowest live asking price currently visible for this exact release.
+     * Lowest live asking price for the selected media grade.
      *
-     * For VG media or better, listings with F, P, No Cover, or Not Graded
-     * sleeves are excluded from the normal media-grade comparison. If the
-     * seller explicitly selects one of those sleeve conditions, however, use
-     * the exact media+sleeve marketplace price for that selection.
+     * Normal recommendation rules:
+     * - M / NM: ignore marketplace copies with G+ or worse sleeves.
+     * - VG+ / VG: ignore marketplace copies with G or worse sleeves.
+     * - G+ and below: no sleeve-quality filter.
+     *
+     * If the seller intentionally selects a sleeve that would normally be
+     * rejected (for example NM media with an F sleeve), the special filter is
+     * disabled for that task and the raw lowest price for the media grade is
+     * used instead.
      */
     fun currentListingPriceFor(
         condition: String,
         sleeveCondition: String? = null
     ): Double? {
-        val rejectedSleevesForVgOrHigher = setOf(
-            "Fair (F)",
-            "Poor (P)",
-            "Not Graded",
-            "No Cover"
-        )
+        val minimumSleeveRank =
+            minimumRecommendedSleeveRankFor(condition)
 
-        val vgOrHigherMedia = setOf(
-            "Very Good (VG)",
-            "Very Good Plus (VG+)",
-            "Near Mint (NM or M-)",
-            "Mint (M)"
-        )
+        // Media grades below VG have no special sleeve-quality rule.
+        if (minimumSleeveRank == null) {
+            return activeMediaLowestPrices[condition]
+                ?.takeIf { it.isFinite() && it > 0.0 }
+                ?.let(::roundPrice)
+        }
 
-        val selectedRejectedSleeve =
-            condition in vgOrHigherMedia &&
-                sleeveCondition in rejectedSleevesForVgOrHigher
-
-        val livePrice =
-            if (selectedRejectedSleeve && sleeveCondition != null) {
-                activeMediaSleeveLowestPrices[
-                    marketplaceConditionKey(
-                        mediaCondition = condition,
-                        sleeveCondition = sleeveCondition
-                    )
-                ]
-            } else {
-                activeMediaLowestPrices[condition]
+        /*
+         * The seller's chosen sleeve is part of the task. If they deliberately
+         * choose a sleeve below the normal threshold (or No Cover / Not Graded /
+         * Generic), do not enforce the sleeve filter for this recommendation.
+         */
+        if (!sleeveCondition.isNullOrBlank()) {
+            val selectedSleeveRank = sleeveGradeRank(sleeveCondition)
+            if (
+                selectedSleeveRank == null ||
+                selectedSleeveRank < minimumSleeveRank
+            ) {
+                return activeMediaLowestPrices[condition]
+                    ?.takeIf { it.isFinite() && it > 0.0 }
+                    ?.let(::roundPrice)
             }
+        }
 
-        return livePrice
-            ?.takeIf { it.isFinite() && it > 0.0 }
+        /*
+         * The scanner stores the raw minimum for every exact media+sleeve pair.
+         * Choose the cheapest pair whose sleeve meets this media grade's rule.
+         */
+        val prefix = "$condition||"
+
+        val filteredLivePrice =
+            activeMediaSleeveLowestPrices
+                .asSequence()
+                .mapNotNull { (key, value) ->
+                    if (!key.startsWith(prefix)) {
+                        return@mapNotNull null
+                    }
+
+                    val sleeve = key.removePrefix(prefix)
+                    val sleeveRank = sleeveGradeRank(sleeve)
+                        ?: return@mapNotNull null
+
+                    value
+                        .takeIf {
+                            sleeveRank >= minimumSleeveRank &&
+                                it.isFinite() &&
+                                it > 0.0
+                        }
+                }
+                .minOrNull()
+
+        return filteredLivePrice
             ?.let(::roundPrice)
     }
 
@@ -253,12 +281,69 @@ data class ReleasePriceSummary(
             )
     }
 
-    private fun marketplaceConditionKey(
-        mediaCondition: String,
-        sleeveCondition: String
-    ): String {
-        return "$mediaCondition||$sleeveCondition"
+    /**
+     * Minimum sleeve grade used when choosing a comparable current listing.
+     * Null means this media grade has no special sleeve-quality filter.
+     */
+    fun minimumComparableSleeveFor(
+        mediaCondition: String
+    ): String? {
+        return when (mediaCondition) {
+            "Mint (M)",
+            "Near Mint (NM or M-)" -> "Very Good (VG)"
+
+            "Very Good Plus (VG+)",
+            "Very Good (VG)" -> "Good Plus (G+)"
+
+            else -> null
+        }
     }
+
+    /**
+     * True when the normal sleeve-quality comparison rule is being applied.
+     * Selecting a sleeve below the normal threshold intentionally disables
+     * the rule for that one listing task.
+     */
+    fun isSleeveQualityFilterActive(
+        mediaCondition: String,
+        selectedSleeveCondition: String?
+    ): Boolean {
+        val minimum = minimumRecommendedSleeveRankFor(mediaCondition)
+            ?: return false
+
+        if (selectedSleeveCondition.isNullOrBlank()) {
+            return true
+        }
+
+        val selectedRank = sleeveGradeRank(selectedSleeveCondition)
+            ?: return false
+
+        return selectedRank >= minimum
+    }
+
+    private fun minimumRecommendedSleeveRankFor(
+        mediaCondition: String
+    ): Int? {
+        return minimumComparableSleeveFor(mediaCondition)
+            ?.let(::sleeveGradeRank)
+    }
+
+    private fun sleeveGradeRank(
+        sleeveCondition: String
+    ): Int? {
+        return when (sleeveCondition) {
+            "Poor (P)" -> 0
+            "Fair (F)" -> 1
+            "Good (G)" -> 2
+            "Good Plus (G+)" -> 3
+            "Very Good (VG)" -> 4
+            "Very Good Plus (VG+)" -> 5
+            "Near Mint (NM or M-)" -> 6
+            "Mint (M)" -> 7
+            else -> null
+        }
+    }
+
 
     private fun originalRecommendationFor(
         condition: String

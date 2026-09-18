@@ -82,6 +82,13 @@ interface DiscogsApiService {
         @Query("per_page") perPage: Int = 50
     ): InventoryResponse
 
+    @GET("marketplace/listings/{listing_id}")
+    suspend fun getMarketplaceListing(
+        @Path("listing_id") listingId: Long,
+        @Header("Authorization") authHeader: String,
+        @Query("curr_abbr") currency: String = "USD"
+    ): InventoryListing
+
     @DELETE("marketplace/listings/{listing_id}")
     suspend fun deleteListing(
         @Path("listing_id") listingId: Long,

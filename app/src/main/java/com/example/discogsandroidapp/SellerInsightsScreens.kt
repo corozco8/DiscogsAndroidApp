@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -37,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,11 +66,19 @@ private fun formatMoney(
         }
 
     return prefix +
-        String.format(
-            Locale.getDefault(),
-            "%.2f",
-            value
-        )
+            String.format(
+                Locale.US,
+                "%,.2f",
+                value
+            )
+}
+
+private fun formatWholeNumber(value: Int): String {
+    return String.format(
+        Locale.US,
+        "%,d",
+        value
+    )
 }
 
 private fun formatSyncTime(epochMs: Long?): String {
@@ -164,10 +174,13 @@ fun InventoryAgingScreen(
     var minimumAgeDays by remember {
         mutableStateOf(30)
     }
+    var oldestFirst by remember {
+        mutableStateOf(true)
+    }
 
     val now = System.currentTimeMillis()
 
-    val filtered =
+    val filteredBase =
         inventory
             .filter { listing ->
                 ageDays(
@@ -194,9 +207,17 @@ fun InventoryAgingScreen(
                     }
                 }
             }
-            .sortedBy {
+
+    val filtered =
+        if (oldestFirst) {
+            filteredBase.sortedBy {
                 it.listedAtEpochMs
             }
+        } else {
+            filteredBase.sortedByDescending {
+                it.listedAtEpochMs
+            }
+        }
 
     Column(
         modifier = Modifier.fillMaxSize()
@@ -242,6 +263,26 @@ fun InventoryAgingScreen(
                 Text("Search aged inventory")
             },
             singleLine = true,
+            trailingIcon = {
+                IconButton(
+                    onClick = {
+                        oldestFirst = !oldestFirst
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sort,
+                        contentDescription =
+                            if (oldestFirst) {
+                                "Sorted oldest first. Tap for newest first."
+                            } else {
+                                "Sorted newest first. Tap for oldest first."
+                            },
+                        modifier = Modifier.rotate(
+                            if (oldestFirst) 0f else 180f
+                        )
+                    )
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(
@@ -252,7 +293,7 @@ fun InventoryAgingScreen(
 
         Text(
             text =
-                "${filtered.size} of ${inventory.size} active listings",
+                "${formatWholeNumber(filtered.size)} of ${formatWholeNumber(inventory.size)} active listings",
             modifier = Modifier.padding(
                 horizontal = 16.dp,
                 vertical = 4.dp
@@ -377,7 +418,8 @@ fun InventoryAgingScreen(
 
 private data class AnalyticsWindow(
     val label: String,
-    val days: Int?
+    val days: Int? = null,
+    val yearToDate: Boolean = false
 )
 
 @Composable
@@ -390,10 +432,11 @@ fun SalesAnalyticsScreen(
 ) {
     val windows =
         listOf(
-            AnalyticsWindow("30d", 30),
-            AnalyticsWindow("90d", 90),
-            AnalyticsWindow("1y", 365),
-            AnalyticsWindow("All", null)
+            AnalyticsWindow("30d", days = 30),
+            AnalyticsWindow("90d", days = 90),
+            AnalyticsWindow("1y", days = 365),
+            AnalyticsWindow("YTD", yearToDate = true),
+            AnalyticsWindow("All")
         )
 
     var selectedWindow by remember {
@@ -401,18 +444,33 @@ fun SalesAnalyticsScreen(
     }
 
     val now = System.currentTimeMillis()
+    val startOfCurrentYear =
+        Calendar.getInstance().apply {
+            timeInMillis = now
+            set(Calendar.MONTH, Calendar.JANUARY)
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+    val selectedDays = selectedWindow.days
     val cutoff =
-        selectedWindow.days?.let {
-            now - it * DAY_MS
+        when {
+            selectedWindow.yearToDate -> startOfCurrentYear
+            selectedDays != null ->
+                now - selectedDays * DAY_MS
+            else -> null
         }
 
     val salesOrders =
         orders.filter { order ->
             orderCountsAsSale(order.status) &&
-                (
-                    cutoff == null ||
-                        order.createdAtEpochMs >= cutoff
-                    )
+                    (
+                            cutoff == null ||
+                                    order.createdAtEpochMs >= cutoff
+                            )
         }
 
     val itemsByOrder =
@@ -431,7 +489,7 @@ fun SalesAnalyticsScreen(
         return max(
             0.0,
             (order.totalValue ?: 0.0) -
-                (order.shippingValue ?: 0.0)
+                    (order.shippingValue ?: 0.0)
         )
     }
 
@@ -445,8 +503,10 @@ fun SalesAnalyticsScreen(
         salesOrders.sumOf {
             it.feeValue ?: 0.0
         }
+    val grossIncome =
+        itemSales + shipping
     val netAfterDiscogsFees =
-        itemSales + shipping - fees
+        grossIncome - fees
     val averageOrder =
         if (salesOrders.isEmpty()) {
             0.0
@@ -549,7 +609,7 @@ fun SalesAnalyticsScreen(
             ) {
                 AnalyticsMetricCard(
                     label = "Orders",
-                    value = salesOrders.size.toString()
+                    value = formatWholeNumber(salesOrders.size)
                 )
                 AnalyticsMetricCard(
                     label = "Item sales",
@@ -562,6 +622,13 @@ fun SalesAnalyticsScreen(
                     label = "Shipping collected",
                     value = formatMoney(
                         shipping,
+                        currency
+                    )
+                )
+                AnalyticsMetricCard(
+                    label = "Gross income",
+                    value = formatMoney(
+                        grossIncome,
                         currency
                     )
                 )
@@ -602,8 +669,9 @@ fun SalesAnalyticsScreen(
             ) {
                 Text(
                     text =
-                        "Net after Discogs fees is not true accounting profit yet. " +
-                            "It does not subtract record acquisition cost, postage, packing supplies, taxes, or payment-processing costs.",
+                        "Gross income is item sales plus shipping collected, before Discogs fees. " +
+                                "Net after Discogs fees is not true accounting profit yet. " +
+                                "It does not subtract record acquisition cost, postage, packing supplies, taxes, or payment-processing costs.",
                     modifier = Modifier.padding(14.dp),
                     fontSize = 12.sp,
                     color =
@@ -778,7 +846,7 @@ fun CustomerHistoryScreen(
         orders
             .filter {
                 it.buyerUsername.isNotBlank() &&
-                    it.buyerUsername != "Unknown buyer"
+                        it.buyerUsername != "Unknown buyer"
             }
             .groupBy {
                 it.buyerUsername
@@ -810,10 +878,10 @@ fun CustomerHistoryScreen(
             }
             .filter {
                 query.isBlank() ||
-                    it.username.contains(
-                        query.trim(),
-                        ignoreCase = true
-                    )
+                        it.username.contains(
+                            query.trim(),
+                            ignoreCase = true
+                        )
             }
             .sortedWith(
                 compareByDescending<CustomerSummary> {
