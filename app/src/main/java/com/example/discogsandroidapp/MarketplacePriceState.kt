@@ -3,7 +3,9 @@ package com.example.discogsandroidapp
 /** A snapshot from one scan, in USD, excluding shipping. Never merge separate scans. */
 data class ActiveMarketplaceConditionPrices(
     val mediaLowest: Map<String, Double> = emptyMap(),
-    val mediaSleeveLowest: Map<String, Double> = emptyMap()
+    val mediaSleeveLowest: Map<String, Double> = emptyMap(),
+    val mediaListingCounts: Map<String, Int> = emptyMap(),
+    val mediaSleeveListingCounts: Map<String, Int> = emptyMap()
 ) {
     // Legacy convenience accessors retained for the existing ReleasePriceSummary adapter.
     val nearMint: Double?
@@ -29,7 +31,14 @@ data class ActiveMarketplaceConditionPrices(
     fun plusPage(page: ActiveMarketplaceConditionPrices): ActiveMarketplaceConditionPrices {
         fun minima(a: Map<String, Double>, b: Map<String, Double>) =
             (a.keys + b.keys).associateWith { key -> minOf(a[key] ?: Double.POSITIVE_INFINITY, b[key] ?: Double.POSITIVE_INFINITY) }
-        return ActiveMarketplaceConditionPrices(minima(mediaLowest, page.mediaLowest), minima(mediaSleeveLowest, page.mediaSleeveLowest))
+        // Only combine distinct pages, never repeated samples of the same page.
+        fun counts(a: Map<String, Int>, b: Map<String, Int>) =
+            (a.keys + b.keys).associateWith { key -> (a[key] ?: 0) + (b[key] ?: 0) }
+        return ActiveMarketplaceConditionPrices(
+            minima(mediaLowest, page.mediaLowest), minima(mediaSleeveLowest, page.mediaSleeveLowest),
+            counts(mediaListingCounts, page.mediaListingCounts),
+            counts(mediaSleeveListingCounts, page.mediaSleeveListingCounts)
+        )
     }
 }
 

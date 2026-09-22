@@ -35,7 +35,9 @@ fun DiscogsWebScreen(
         mutableStateOf<WebView?>(null)
     }
 
-    DisposableEffect(url) {
+    val requestedUrl = remember { arrayOf<String?>(null) }
+
+    DisposableEffect(Unit) {
         onDispose {
             webView?.apply {
                 stopLoading()
@@ -140,12 +142,14 @@ fun DiscogsWebScreen(
                             }
                         }
 
+                    requestedUrl[0] = url
                     loadUrl(url)
                 }
             },
             update = { view ->
                 webView = view
-                if (view.url != url) {
+                if (requestedUrl[0] != url) {
+                    requestedUrl[0] = url
                     view.loadUrl(url)
                 }
             }

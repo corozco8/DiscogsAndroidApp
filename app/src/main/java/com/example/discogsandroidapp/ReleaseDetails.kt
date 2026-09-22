@@ -68,6 +68,10 @@ fun ReleaseDetails(
             }
         )
     }
+    var verificationPromptDismissed by remember(releaseId) {
+        mutableStateOf(false)
+    }
+
     var effectivePriceSummary by remember(releaseId) {
         mutableStateOf(
             if (liveMarketplacePrices != null) {
@@ -118,6 +122,8 @@ fun ReleaseDetails(
             } ?: priceSummary
     }
 
+
+
     DisposableEffect(releaseId) {
         pricingWebViewActive.set(true)
 
@@ -135,7 +141,12 @@ fun ReleaseDetails(
 
     if (showSellDialog) {
         AddListingDialog(
-            priceSummary = effectivePriceSummary ?: priceSummary,
+            // The loaded release metadata is authoritative even if the
+            // optional price summary is still being fetched.
+            priceSummary = (effectivePriceSummary ?: priceSummary
+            ?: ReleasePriceSummary()).copy(
+                isAlbumRelease = release.isAlbumFormat()
+            ),
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeve, comments ->
                 showSellDialog = false
@@ -144,6 +155,7 @@ fun ReleaseDetails(
             }
         )
     }
+
 
     Box(modifier = modifier.fillMaxSize()) {
         if (releaseId != null) {
@@ -170,6 +182,7 @@ fun ReleaseDetails(
                                 ) {
                                     super.onPageStarted(view, url, favicon)
                                     pricingScanGeneration[0]++
+
                                     marketplacePricingStatus =
                                         if (liveMarketplacePrices != null) {
                                             MarketplaceUiPriceStatus.CACHED
@@ -219,6 +232,8 @@ fun ReleaseDetails(
                                 ) {
                                     super.onPageFinished(view, url)
 
+
+
                                     if (!marketplaceUrlBelongsToRelease(url, releaseId)) {
                                         return
                                     }
@@ -230,11 +245,11 @@ fun ReleaseDetails(
                                         releaseId = releaseId,
                                         isCurrent = {
                                             pricingWebViewActive.get() &&
-                                                generation == pricingScanGeneration[0] &&
-                                                marketplaceUrlBelongsToRelease(
-                                                    view.url,
-                                                    releaseId
-                                                )
+                                                    generation == pricingScanGeneration[0] &&
+                                                    marketplaceUrlBelongsToRelease(
+                                                        view.url,
+                                                        releaseId
+                                                    )
                                         },
                                         onPrices = ::applyMarketplacePrices,
                                         onStatus = { status ->
@@ -264,437 +279,437 @@ fun ReleaseDetails(
             }
         }
 
-    SwipeRefreshWrapper(
-        isRefreshing = isRefreshing,
-        onRefresh = {
-            isRefreshing = true
-            liveMarketplacePrices = null
-            marketplacePricingStatus = MarketplaceUiPriceStatus.LOADING
-            effectivePriceSummary = priceSummary
-            pricingScanGeneration[0]++
+        SwipeRefreshWrapper(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                isRefreshing = true
+                liveMarketplacePrices = null
+                marketplacePricingStatus = MarketplaceUiPriceStatus.LOADING
+                effectivePriceSummary = priceSummary
+                pricingScanGeneration[0]++
 
-            if (onRefresh != null) {
-                onRefresh.invoke()
-            } else {
-                pricingWebView?.reload()
-            }
+                if (onRefresh != null) {
+                    onRefresh.invoke()
+                } else {
+                    pricingWebView?.reload()
+                }
 
-            // If the caller performs a full release reload this screen will
-            // normally leave composition. This fallback keeps the spinner
-            // from sticking when only marketplace pricing is refreshed.
-            coroutineScope.launch {
-                kotlinx.coroutines.delay(1500)
-                isRefreshing = false
-            }
-        },
-        modifier = Modifier.fillMaxSize()
-    ) {
-        Column(
-            modifier = Modifier
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            horizontalAlignment = Alignment.Start
+                // If the caller performs a full release reload this screen will
+                // normally leave composition. This fallback keeps the spinner
+                // from sticking when only marketplace pricing is refreshed.
+                coroutineScope.launch {
+                    kotlinx.coroutines.delay(1500)
+                    isRefreshing = false
+                }
+            },
+            modifier = Modifier.fillMaxSize()
         ) {
-            // Large Album Art Carousel
-            val imageUrls = if (!release.images.isNullOrEmpty()) {
-                release.images.mapNotNull { it.uri }
-            } else {
-                listOf(release.thumb.takeIf { !it.isNullOrBlank() } ?: "https://via.placeholder.com/400")
-            }
-
-            val pagerState = rememberPagerState(pageCount = { imageUrls.size })
-
-            HorizontalPager(
-                state = pagerState,
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-            ) { page ->
-                AsyncImage(
-                    model = imageUrls[page],
-                    contentDescription = "Album Cover ${page + 1}",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.Start
+            ) {
+                // Large Album Art Carousel
+                val imageUrls = if (!release.images.isNullOrEmpty()) {
+                    release.images.mapNotNull { it.uri }
+                } else {
+                    listOf(release.thumb.takeIf { !it.isNullOrBlank() } ?: "https://via.placeholder.com/400")
+                }
 
-            // Thumbnail Preview Row
-            if (imageUrls.size > 1) {
-                LazyRow(
+                val pagerState = rememberPagerState(pageCount = { imageUrls.size })
+
+                HorizontalPager(
+                    state = pagerState,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(imageUrls.size) { index ->
-                        val isSelected = pagerState.currentPage == index
+                        .aspectRatio(1f)
+                ) { page ->
+                    AsyncImage(
+                        model = imageUrls[page],
+                        contentDescription = "Album Cover ${page + 1}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
-                        AsyncImage(
-                            model = imageUrls[index],
-                            contentDescription = "Thumbnail ${index + 1}",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(60.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .alpha(if (isSelected) 1f else 0.5f)
-                                .border(
-                                    width = if (isSelected) 2.dp else 0.dp,
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .clickable {
-                                    coroutineScope.launch {
-                                        pagerState.animateScrollToPage(index)
+                // Thumbnail Preview Row
+                if (imageUrls.size > 1) {
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(imageUrls.size) { index ->
+                            val isSelected = pagerState.currentPage == index
+
+                            AsyncImage(
+                                model = imageUrls[index],
+                                contentDescription = "Thumbnail ${index + 1}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .alpha(if (isSelected) 1f else 0.5f)
+                                    .border(
+                                        width = if (isSelected) 2.dp else 0.dp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        coroutineScope.launch {
+                                            pagerState.animateScrollToPage(index)
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left side: Title and Artist
+                    Column(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = release.title ?: "Unknown Title",
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            lineHeight = 32.sp
+                        )
+                        Text(
+                            text = release.artists?.joinToString(", ") { it.name ?: "" } ?: "Unknown Artist",
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    // Right side: Sell button
+                    FilledTonalButton(
+                        onClick = { showSellDialog = true },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sell,
+                            contentDescription = "Sell",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Sell", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // REAL-TIME SALES RANGE CARD (Market summary remains intact)
+                SalesRangeCard(
+                    summary = priceSummary ?: ReleasePriceSummary(),
+                    haveCount = release.community?.have ?: 0,
+                    wantCount = release.community?.want ?: 0,
+                    onListingsClick = { release.id?.let { onViewListingsClick(it) } }
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        @Composable
+                        fun InfoRow(label: String, value: String) {
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                Text(text = label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.35f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(text = value, modifier = Modifier.weight(0.65f), color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+
+                        val labelText = release.labels?.firstOrNull()?.name?.let {
+                            "$it ${release.labels.firstOrNull()?.catno?.let { cat -> "– $cat" } ?: ""}"
+                        } ?: "Unknown"
+
+                        InfoRow("Label:", labelText)
+                        val formatText =
+                            release.formats
+                                ?.flatMap { format ->
+                                    buildList {
+                                        format.name
+                                            ?.takeIf { it.isNotBlank() }
+                                            ?.let { add(it) }
+
+                                        format.descriptions
+                                            ?.filter { it.isNotBlank() }
+                                            ?.let { addAll(it) }
+
+                                        format.text
+                                            ?.takeIf { it.isNotBlank() }
+                                            ?.let { add(it) }
                                     }
                                 }
+                                ?.distinct()
+                                ?.joinToString(", ")
+                                ?.takeIf { it.isNotBlank() }
+                                ?: "Unknown"
+
+                        InfoRow("Format:", formatText)
+                        InfoRow("Country:", release.country ?: "Unknown")
+                        InfoRow(
+                            "Released:",
+                            release.released
+                                ?.takeIf { it.isNotBlank() }
+                                ?: release.year?.toString()
+                                ?: "Unknown"
+                        )
+                        InfoRow("Genre:", release.genres?.joinToString(", ") ?: "Unknown")
+                        InfoRow("Style:", release.styles?.joinToString(", ") ?: "Unknown")
+                    }
+                }
+
+                release.masterId?.let { masterId ->
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            onViewVersionsClick(masterId)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = "View All Versions of This Release",
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                val tracks =
+                    release.tracklist.orEmpty()
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Left side: Title and Artist
-                Column(
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = release.title ?: "Unknown Title",
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        lineHeight = 32.sp
-                    )
-                    Text(
-                        text = release.artists?.joinToString(", ") { it.name ?: "" } ?: "Unknown Artist",
-                        fontSize = 18.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
+                if (tracks.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(24.dp))
 
-                Spacer(modifier = Modifier.width(12.dp))
-
-                // Right side: Sell button
-                FilledTonalButton(
-                    onClick = { showSellDialog = true },
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Sell,
-                        contentDescription = "Sell",
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Sell", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // REAL-TIME SALES RANGE CARD (Market summary remains intact)
-            SalesRangeCard(
-                summary = priceSummary ?: ReleasePriceSummary(),
-                haveCount = release.community?.have ?: 0,
-                wantCount = release.community?.want ?: 0,
-                onListingsClick = { release.id?.let { onViewListingsClick(it) } }
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    @Composable
-                    fun InfoRow(label: String, value: String) {
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            Text(text = label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.35f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = value, modifier = Modifier.weight(0.65f), color = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-
-                    val labelText = release.labels?.firstOrNull()?.name?.let {
-                        "$it ${release.labels.firstOrNull()?.catno?.let { cat -> "– $cat" } ?: ""}"
-                    } ?: "Unknown"
-
-                    InfoRow("Label:", labelText)
-                    val formatText =
-                        release.formats
-                            ?.flatMap { format ->
-                                buildList {
-                                    format.name
-                                        ?.takeIf { it.isNotBlank() }
-                                        ?.let { add(it) }
-
-                                    format.descriptions
-                                        ?.filter { it.isNotBlank() }
-                                        ?.let { addAll(it) }
-
-                                    format.text
-                                        ?.takeIf { it.isNotBlank() }
-                                        ?.let { add(it) }
-                                }
-                            }
-                            ?.distinct()
-                            ?.joinToString(", ")
-                            ?.takeIf { it.isNotBlank() }
-                            ?: "Unknown"
-
-                    InfoRow("Format:", formatText)
-                    InfoRow("Country:", release.country ?: "Unknown")
-                    InfoRow(
-                        "Released:",
-                        release.released
-                            ?.takeIf { it.isNotBlank() }
-                            ?: release.year?.toString()
-                            ?: "Unknown"
-                    )
-                    InfoRow("Genre:", release.genres?.joinToString(", ") ?: "Unknown")
-                    InfoRow("Style:", release.styles?.joinToString(", ") ?: "Unknown")
-                }
-            }
-
-            release.masterId?.let { masterId ->
-                Spacer(modifier = Modifier.height(16.dp))
-
-                OutlinedButton(
-                    onClick = {
-                        onViewVersionsClick(masterId)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text(
-                        text = "View All Versions of This Release",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            val tracks =
-                release.tracklist.orEmpty()
-
-            if (tracks.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(24.dp))
-
-                ReleaseInfoSection(
-                    title = "Tracklist"
-                ) {
-                    tracks.forEachIndexed { index, track ->
-                        Column(
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.Top
+                    ReleaseInfoSection(
+                        title = "Tracklist"
+                    ) {
+                        tracks.forEachIndexed { index, track ->
+                            Column(
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(
-                                    text = track.position.orEmpty(),
-                                    modifier = Modifier.width(44.dp),
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 13.sp
-                                )
-
-                                Column(
-                                    modifier = Modifier.weight(1f)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top
                                 ) {
                                     Text(
-                                        text = track.title
-                                            ?: "Untitled",
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium
+                                        text = track.position.orEmpty(),
+                                        modifier = Modifier.width(44.dp),
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp
                                     )
 
-                                    track.extraArtists
-                                        .orEmpty()
-                                        .filter {
-                                            !it.name.isNullOrBlank() ||
-                                                    !it.role.isNullOrBlank()
-                                        }
-                                        .forEach { credit ->
+                                    Column(
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text(
+                                            text = track.title
+                                                ?: "Untitled",
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+
+                                        track.extraArtists
+                                            .orEmpty()
+                                            .filter {
+                                                !it.name.isNullOrBlank() ||
+                                                        !it.role.isNullOrBlank()
+                                            }
+                                            .forEach { credit ->
+                                                Text(
+                                                    text = buildString {
+                                                        if (!credit.role.isNullOrBlank()) {
+                                                            append(credit.role)
+                                                            append(" – ")
+                                                        }
+                                                        append(
+                                                            credit.name
+                                                                ?: "Unknown"
+                                                        )
+                                                    },
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                    }
+
+                                    track.duration
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let { duration ->
                                             Text(
-                                                text = buildString {
-                                                    if (!credit.role.isNullOrBlank()) {
-                                                        append(credit.role)
-                                                        append(" – ")
-                                                    }
-                                                    append(
-                                                        credit.name
-                                                            ?: "Unknown"
-                                                    )
-                                                },
-                                                fontSize = 11.sp,
+                                                text = duration,
+                                                fontSize = 12.sp,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
                                 }
 
-                                track.duration
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let { duration ->
-                                        Text(
-                                            text = duration,
-                                            fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                if (index != tracks.lastIndex) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(
+                                            vertical = 8.dp
                                         )
-                                    }
-                            }
-
-                            if (index != tracks.lastIndex) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(
-                                        vertical = 8.dp
                                     )
-                                )
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            val companies =
-                release.companies.orEmpty()
+                val companies =
+                    release.companies.orEmpty()
 
-            if (companies.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(20.dp))
-
-                ReleaseInfoSection(
-                    title = "Companies, etc."
-                ) {
-                    companies.forEach { company ->
-                        Text(
-                            text = buildString {
-                                company.entityTypeName
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(it)
-                                        append(" – ")
-                                    }
-
-                                append(
-                                    company.name
-                                        ?: "Unknown"
-                                )
-
-                                company.catno
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(" – ")
-                                        append(it)
-                                    }
-                            },
-                            fontSize = 13.sp
-                        )
-                    }
-                }
-            }
-
-            val credits =
-                release.extraArtists.orEmpty()
-
-            if (credits.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(20.dp))
-
-                ReleaseInfoSection(
-                    title = "Credits"
-                ) {
-                    credits.forEach { credit ->
-                        Text(
-                            text = buildString {
-                                credit.role
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(it)
-                                        append(" – ")
-                                    }
-
-                                append(
-                                    credit.name
-                                        ?: "Unknown"
-                                )
-
-                                credit.tracks
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(" (tracks: ")
-                                        append(it)
-                                        append(")")
-                                    }
-                            },
-                            fontSize = 13.sp
-                        )
-                    }
-                }
-            }
-
-            release.notes
-                ?.takeIf { it.isNotBlank() }
-                ?.let { notes ->
+                if (companies.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(20.dp))
 
                     ReleaseInfoSection(
-                        title = "Notes"
+                        title = "Companies, etc."
                     ) {
-                        Text(
-                            text = notes,
-                            fontSize = 13.sp,
-                            lineHeight = 19.sp
-                        )
+                        companies.forEach { company ->
+                            Text(
+                                text = buildString {
+                                    company.entityTypeName
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(it)
+                                            append(" – ")
+                                        }
+
+                                    append(
+                                        company.name
+                                            ?: "Unknown"
+                                    )
+
+                                    company.catno
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(" – ")
+                                            append(it)
+                                        }
+                                },
+                                fontSize = 13.sp
+                            )
+                        }
                     }
                 }
 
-            val identifiers =
-                release.identifiers.orEmpty()
+                val credits =
+                    release.extraArtists.orEmpty()
 
-            if (identifiers.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(20.dp))
+                if (credits.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(20.dp))
 
-                ReleaseInfoSection(
-                    title = "Barcode and Other Identifiers"
-                ) {
-                    identifiers.forEach { identifier ->
-                        Text(
-                            text = buildString {
-                                identifier.type
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(it)
-                                        append(": ")
-                                    }
+                    ReleaseInfoSection(
+                        title = "Credits"
+                    ) {
+                        credits.forEach { credit ->
+                            Text(
+                                text = buildString {
+                                    credit.role
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(it)
+                                            append(" – ")
+                                        }
 
-                                append(
-                                    identifier.value
-                                        ?: "Unknown"
-                                )
+                                    append(
+                                        credit.name
+                                            ?: "Unknown"
+                                    )
 
-                                identifier.description
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let {
-                                        append(" (")
-                                        append(it)
-                                        append(")")
-                                    }
-                            },
-                            fontSize = 13.sp
-                        )
+                                    credit.tracks
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(" (tracks: ")
+                                            append(it)
+                                            append(")")
+                                        }
+                                },
+                                fontSize = 13.sp
+                            )
+                        }
                     }
                 }
+
+                release.notes
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { notes ->
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        ReleaseInfoSection(
+                            title = "Notes"
+                        ) {
+                            Text(
+                                text = notes,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp
+                            )
+                        }
+                    }
+
+                val identifiers =
+                    release.identifiers.orEmpty()
+
+                if (identifiers.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    ReleaseInfoSection(
+                        title = "Barcode and Other Identifiers"
+                    ) {
+                        identifiers.forEach { identifier ->
+                            Text(
+                                text = buildString {
+                                    identifier.type
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(it)
+                                            append(": ")
+                                        }
+
+                                    append(
+                                        identifier.value
+                                            ?: "Unknown"
+                                    )
+
+                                    identifier.description
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let {
+                                            append(" (")
+                                            append(it)
+                                            append(")")
+                                        }
+                                },
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
         }
-    }
     }
 }
 
@@ -757,7 +772,7 @@ fun AddListingDialog(
         "Generic"
     )
 
-    Dialog(onDismissRequest = onDismiss) {
+    SearchAccessibleDialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -912,7 +927,7 @@ fun AddListingDialog(
                         keyboardType = KeyboardType.Decimal
                     ),
                     isError = priceError,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.keyboardInputArea().fillMaxWidth(),
                     supportingText =
                         if (priceError) {
                             {
@@ -937,9 +952,13 @@ fun AddListingDialog(
                             )
                             ?.takeIf { it > 0.0 }
 
+                    val gradeEstimate = if (livePrice == null) {
+                        priceSummary?.liveGradeEstimateFor(condition, sleeveCondition)
+                    } else null
+
                     val estimatedPrice =
                         if (livePrice == null) {
-                            priceSummary
+                            gradeEstimate?.price ?: priceSummary
                                 ?.fallbackRecommendedPriceFor(
                                     condition = condition,
                                     sleeveCondition = sleeveCondition
@@ -976,6 +995,8 @@ fun AddListingDialog(
                                                     recommendation
                                                 )
                                             }"
+                                        } else if (gradeEstimate != null) {
+                                            "Estimated ${getShortGrade(condition)}: USD ${String.format(java.util.Locale.US, "%.2f", recommendation)}"
                                         } else {
                                             "Suggested ${getShortGrade(condition)}: \$${
                                                 String.format(
@@ -1010,6 +1031,13 @@ fun AddListingDialog(
                                     )
                                 }
                             }
+                            if (gradeEstimate != null) {
+                                Text(
+                                    text = "From ${getShortGrade(gradeEstimate.sourceCondition)} listings at USD ${String.format(java.util.Locale.US, "%.2f", gradeEstimate.sourcePrice)} · grading-ratio estimate, not a matching listing",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
 
                         }
                     } else {
@@ -1028,7 +1056,7 @@ fun AddListingDialog(
                     onValueChange = { comments = it },
                     label = { Text("Description / Comments") },
                     maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.keyboardInputArea().fillMaxWidth()
                 )
             }
         }

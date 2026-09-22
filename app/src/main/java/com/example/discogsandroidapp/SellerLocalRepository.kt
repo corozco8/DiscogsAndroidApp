@@ -172,8 +172,8 @@ class SellerLocalRepository(context: Context) {
     suspend fun syncRecentOrders(
         token: String,
         recentPages: Int = 5,
-        backfillPagesPerRun: Int = 5
-    ) {
+        backfillPagesPerRun: Int = Int.MAX_VALUE
+    ) = ordersSyncMutex.withLock {
         require(token.isNotBlank()) {
             "Discogs token is missing"
         }
@@ -215,10 +215,22 @@ class SellerLocalRepository(context: Context) {
         val previousState =
             dao.getSyncState(ORDERS_SYNC_KEY)
 
-        var backfillPage =
-            previousState?.nextBackfillPage
-                ?.takeIf { it > recentPages }
-                ?: (recentPages + 1)
+        var backfillPage = nextOrderHistoryPage(
+            previousState, recentPages, totalPages
+        )
+
+        suspend fun checkpoint(nextPage: Int) {
+            val next = nextPage.takeIf { it <= totalPages }
+            dao.upsertSyncState(LocalSyncStateEntity(
+                key = ORDERS_SYNC_KEY,
+                lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
+                itemCount = dao.countOrders(),
+                note = if (next == null) "Full order history cached" else "Downloading order history: page $next of $totalPages",
+                nextBackfillPage = next,
+                totalPages = totalPages
+            ))
+        }
+        checkpoint(backfillPage)
 
         var pagesBackfilled = 0
 
@@ -241,6 +253,7 @@ class SellerLocalRepository(context: Context) {
 
             backfillPage++
             pagesBackfilled++
+            checkpoint(backfillPage)
         }
 
         val nextBackfillPage =
@@ -358,6 +371,7 @@ class SellerLocalRepository(context: Context) {
 
     companion object {
         private val inventorySyncMutex = Mutex()
+        private val ordersSyncMutex = Mutex()
 
         const val INVENTORY_SYNC_KEY = "inventory"
         const val ORDERS_SYNC_KEY = "orders"

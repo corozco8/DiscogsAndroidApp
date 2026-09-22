@@ -157,7 +157,7 @@ fun AiSearchScreen(
         OutlinedTextField(
             value = query,
             onValueChange = viewModel::updateQuery,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.keyboardInputArea().fillMaxWidth(),
             placeholder = {
                 Text("Show me Beatles records over $20")
             },

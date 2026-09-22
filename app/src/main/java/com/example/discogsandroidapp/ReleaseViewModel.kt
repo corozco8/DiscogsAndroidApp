@@ -66,7 +66,6 @@ sealed interface ReleaseUiState {
     data class Error(val message: String) : ReleaseUiState
     object Inventory : ReleaseUiState
     object Offers : ReleaseUiState
-    object InventoryAging : ReleaseUiState
     object SalesAnalytics : ReleaseUiState
     object CustomerHistory : ReleaseUiState
     data class OrderDetails(val order: DiscogsOrder) : ReleaseUiState
@@ -417,7 +416,7 @@ class ReleaseViewModel : ViewModel() {
                 visibleMessages.maxByOrNull { message ->
                     message.timestamp.orEmpty()
                 }
-                ?: return null
+                    ?: return null
 
             SellerConversationSummary(
                 order = order,
@@ -584,6 +583,12 @@ class ReleaseViewModel : ViewModel() {
                         authHeader = authHeader
                     )
 
+                if (newStatus.equals("In Progress", ignoreCase = true) &&
+                    updatedOrder.status.equals("In Progress", ignoreCase = true)) {
+                    fetchOrdersByStatus("In Progress", token)
+                    return@launch
+                }
+
                 val enrichedUpdatedOrder =
                     enrichOrderWithListingDates(
                         order = updatedOrder,
@@ -641,12 +646,10 @@ class ReleaseViewModel : ViewModel() {
 
     fun navigateToOffers() {
         invalidateNavigationRequests()
-        _uiState.value = ReleaseUiState.Offers
-    }
-
-    fun navigateToInventoryAging() {
-        invalidateNavigationRequests()
-        _uiState.value = ReleaseUiState.InventoryAging
+        _uiState.value = ReleaseUiState.DiscogsWebView(
+            title = "My Offers",
+            url = "https://www.discogs.com/sell/orders"
+        )
     }
 
     fun navigateToSalesAnalytics() {
@@ -718,8 +721,8 @@ class ReleaseViewModel : ViewModel() {
             _uiState.value = ReleaseUiState.StoreSuccess(
                 listings = currentListings.toList(),
                 totalItems =
-                    (_uiState.value as? ReleaseUiState.StoreSuccess)
-                        ?.totalItems
+                    currentStoreTotalItems
+                        .takeIf { it > 0 }
                         ?: currentListings.size,
                 isFetchingMore = true
             )
@@ -779,7 +782,7 @@ class ReleaseViewModel : ViewModel() {
                 _uiState.value =
                     ReleaseUiState.StoreSuccess(
                         listings = currentListings.toList(),
-                        totalItems = response.pagination.items,
+                        totalItems = currentStoreTotalItems,
                         isFetchingMore = false
                     )
 
@@ -797,8 +800,8 @@ class ReleaseViewModel : ViewModel() {
                         ReleaseUiState.StoreSuccess(
                             listings = currentListings.toList(),
                             totalItems =
-                                (_uiState.value as? ReleaseUiState.StoreSuccess)
-                                    ?.totalItems
+                                currentStoreTotalItems
+                                    .takeIf { it > 0 }
                                     ?: currentListings.size,
                             isFetchingMore = false
                         )
@@ -848,6 +851,14 @@ class ReleaseViewModel : ViewModel() {
         )
     }
 
+    /**
+     * Return to My Store without throwing away the current inventory session.
+     *
+     * Release details temporarily replaces [uiState], but the ViewModel still
+     * owns the already-loaded inventory pages and active sort. Re-publishing
+     * that snapshot lets Compose restore the hoisted LazyListState exactly
+     * where the seller left it.
+     */
     fun restoreStoreInventory(token: String) {
         invalidateNavigationRequests()
         storeFetchJob?.cancel()
@@ -864,6 +875,8 @@ class ReleaseViewModel : ViewModel() {
                     isFetchingMore = false
                 )
         } else {
+            // A process recreation can leave no in-memory snapshot. In that
+            // case, reload using the last selected sort instead of defaults.
             fetchStoreInventory(
                 token = token,
                 sort = currentSort,
@@ -949,7 +962,11 @@ class ReleaseViewModel : ViewModel() {
                 // begin warming while stats and suggestions load in parallel.
                 _uiState.value = ReleaseUiState.ReleaseSuccess(
                     release = releaseResponse,
-                    priceSummary = null
+                    // Publish the format immediately, before optional stats
+                    // and price suggestions finish loading.
+                    priceSummary = ReleasePriceSummary(
+                        isAlbumRelease = releaseResponse.isAlbumFormat()
+                    )
                 )
 
                 data class StatsResult(
@@ -1025,7 +1042,8 @@ class ReleaseViewModel : ViewModel() {
                     lastSold = debugMsg,
                     numForSale = statsResult.numForSale,
                     lowestAskingPrice = statsResult.lowestPrice,
-                    priceSuggestions = suggestions
+                    priceSuggestions = suggestions,
+                    isAlbumRelease = releaseResponse.isAlbumFormat()
                 )
 
                 _uiState.value = ReleaseUiState.ReleaseSuccess(
@@ -1697,7 +1715,8 @@ class ReleaseViewModel : ViewModel() {
     private var totalOrdersPages = 1
     private var totalOrdersItems = 0
     private var isFetchingMoreOrders = false
-    private var currentOrdersStatus = "Payment Received"
+    var currentOrdersStatus = "Payment Received"
+        private set
     private var currentOrdersSortOrder = "asc"
     private var ordersFetchJob: Job? = null
     private var ordersRequestGeneration = 0
@@ -1785,12 +1804,14 @@ class ReleaseViewModel : ViewModel() {
                 currentOrdersPage + 1
             }
 
+        val requestedStatus = currentOrdersStatus
+
         ordersFetchJob = viewModelScope.launch {
             try {
                 val response =
                     RetrofitClient.apiService.getOrders(
                         token = "Discogs token=$token",
-                        status = currentOrdersStatus,
+                        status = requestedStatus.takeUnless { it == "All" },
                         page = requestedPage,
                         perPage = 100,
                         sortOrder = currentOrdersSortOrder
@@ -1819,6 +1840,7 @@ class ReleaseViewModel : ViewModel() {
 
                 response.orders
                     .orEmpty()
+                    .filter { matchesOrderStatus(it.status, requestedStatus) }
                     .forEach { order ->
                         val id = order.id
 
@@ -1851,6 +1873,10 @@ class ReleaseViewModel : ViewModel() {
                             currentOrdersPage <
                                     totalOrdersPages
                     )
+
+                if (currentOrders.isEmpty() && currentOrdersPage < totalOrdersPages) {
+                    loadNextOrdersPage(token)
+                }
 
             } catch (e: CancellationException) {
                 throw e

@@ -1,5 +1,8 @@
 package com.example.discogsandroidapp
 
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.platform.LocalView
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -431,6 +434,28 @@ class MainActivity : ComponentActivity() {
                             val keyboardController = LocalSoftwareKeyboardController.current
                             val focusManager = LocalFocusManager.current
                             val searchFocusRequester = remember { FocusRequester() }
+                            val searchHostView = LocalView.current
+                            DisposableEffect(searchFocusRequester) {
+                                SearchDialogBridge.focusSearch = {
+                                    appScope.launch {
+                                        // Let the native dialog detach and return focus to the activity.
+                                        kotlinx.coroutines.delay(32)
+                                        val ready = kotlinx.coroutines.withTimeoutOrNull(1_500) {
+                                            while (!searchHostView.hasWindowFocus()) kotlinx.coroutines.delay(16)
+                                            true
+                                        } ?: false
+                                        if (ready && SearchDialogBridge.focusSearch != null) {
+                                            searchFocusRequester.requestFocus()
+                                            withFrameNanos { }
+                                            keyboardController?.show()
+                                        }
+                                    }
+                                }
+                                onDispose {
+                                    SearchDialogBridge.focusSearch = null
+                                    SearchDialogBridge.searchBounds = null
+                                }
+                            }
                             val scanner = remember { GmsBarcodeScanning.getClient(context) }
                             if (
                                 uiState !is ReleaseUiState.AiSearch &&
@@ -439,7 +464,6 @@ class MainActivity : ComponentActivity() {
                                 uiState !is ReleaseUiState.SellerInboxSuccess &&
                                 uiState !is ReleaseUiState.SellerInboxError &&
                                 uiState !is ReleaseUiState.DiscogsWebView &&
-                                uiState !is ReleaseUiState.InventoryAging &&
                                 uiState !is ReleaseUiState.SalesAnalytics &&
                                 uiState !is ReleaseUiState.CustomerHistory
                             ) {
@@ -487,9 +511,19 @@ class MainActivity : ComponentActivity() {
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         },
-                                        modifier = Modifier
+                                        modifier = Modifier.keyboardInputArea()
                                             .weight(1f)
-                                            .focusRequester(searchFocusRequester),
+                                            .focusRequester(searchFocusRequester)
+                                            .onGloballyPositioned { coordinates ->
+                                                val screen = IntArray(2)
+                                                val window = IntArray(2)
+                                                searchHostView.getLocationOnScreen(screen)
+                                                searchHostView.getLocationInWindow(window)
+                                                SearchDialogBridge.searchBounds = coordinates.boundsInWindow().translate(
+                                                    (screen[0] - window[0]).toFloat(),
+                                                    (screen[1] - window[1]).toFloat()
+                                                )
+                                            },
                                         singleLine = true,
                                         keyboardOptions = KeyboardOptions(
                                             imeAction = ImeAction.Search
@@ -686,9 +720,6 @@ class MainActivity : ComponentActivity() {
                                                         viewModel.navigateToOffers()
                                                     },
 
-                                                    onInventoryAgingClick = {
-                                                        viewModel.navigateToInventoryAging()
-                                                    },
 
                                                     onSalesAnalyticsClick = {
                                                         viewModel.navigateToSalesAnalytics()
@@ -964,10 +995,10 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrdersSuccess -> {
                                         val visibleOrders =
                                             visibleSellerOrders(
-                                                state.orders
+                                                state.orders.filter { matchesOrderStatus(it.status, viewModel.currentOrdersStatus) }
                                             )
 
-                                        var selectedStatus by remember { mutableStateOf("Payment Received") }
+                                        val selectedStatus = viewModel.currentOrdersStatus.let { if (it == "All") "All Orders" else it }
                                         var filterExpanded by remember { mutableStateOf(false) }
                                         val orderStatuses = listOf(
                                             "Payment Received",
@@ -987,7 +1018,7 @@ class MainActivity : ComponentActivity() {
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Text(
-                                                    text = "My Orders (${visibleOrders.size})",
+                                                    text = "$selectedStatus (${visibleOrders.size})",
                                                     fontSize = 20.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -1010,7 +1041,6 @@ class MainActivity : ComponentActivity() {
                                                                     )
                                                                 },
                                                                 onClick = {
-                                                                    selectedStatus = status
                                                                     filterExpanded = false
                                                                     viewModel.fetchOrdersByStatus(status, token)
                                                                 }
@@ -1159,19 +1189,6 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
 
-                                    is ReleaseUiState.InventoryAging -> {
-                                        InventoryAgingScreen(
-                                            inventory = localInventory,
-                                            syncState = inventorySyncState,
-                                            onBackClick = {
-                                                viewModel.resetToIdle()
-                                            },
-                                            onRefreshClick = {
-                                                sellerInsightsViewModel.refreshNow()
-                                            }
-                                        )
-                                    }
-
                                     is ReleaseUiState.SalesAnalytics -> {
                                         SalesAnalyticsScreen(
                                             orders = localOrders,
@@ -1231,7 +1248,6 @@ fun ProfileDashboard(
     onInboxClick: () -> Unit,
     onInventoryClick: () -> Unit,
     onOffersClick: () -> Unit,
-    onInventoryAgingClick: () -> Unit,
     onSalesAnalyticsClick: () -> Unit,
     onCustomerHistoryClick: () -> Unit,
     onSellerRatingClick: () -> Unit,
@@ -1386,12 +1402,6 @@ fun ProfileDashboard(
         DashboardSectionTitle("Seller Insights")
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            MenuBrick(
-                title = "Inventory Aging",
-                icon = Icons.Default.AccessTime,
-                onClick = onInventoryAgingClick
-            )
-
             MenuBrick(
                 title = "Sales & Profit Analytics",
                 icon = Icons.Default.Insights,
@@ -2078,6 +2088,7 @@ fun InventoryItemCard(
                 }
         )
     ) {
+        Box(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -2195,6 +2206,7 @@ fun InventoryItemCard(
                 }
             }
         }
+        }
     }
 }
 
@@ -2230,7 +2242,7 @@ fun EditListingDialog(
         onDismissRequest = onDismiss,
         title = { Text("Edit Listing") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(modifier = Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
 
                 // 1. Price Field
                 OutlinedTextField(
@@ -2239,7 +2251,7 @@ fun EditListingDialog(
                         price = it
                         priceError = null
                     },
-                    label = { Text("Price (USD)") },
+                    label = { Text("Price (${listing.price?.currency ?: "USD"})") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal
@@ -2251,7 +2263,7 @@ fun EditListingDialog(
                                 Text(message)
                             }
                         },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.keyboardInputArea().fillMaxWidth()
                 )
 
                 // 2. Media Condition Scrollable Row
@@ -2320,7 +2332,7 @@ fun EditListingDialog(
                     onValueChange = { comments = it },
                     label = { Text("Description / Comments") },
                     maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.keyboardInputArea().fillMaxWidth()
                 )
             }
         },
@@ -2407,13 +2419,17 @@ fun ListingDetailsDialog(
             }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    SearchAccessibleDialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 8.dp
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 640.dp)) {
+                Column(
+                    modifier = Modifier.weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState())
+                ) {
                 AsyncImage(
                     model =
                         highResolutionImageUrl
@@ -2433,7 +2449,9 @@ fun ListingDetailsDialog(
                     Text(
                         text = listing.release.description,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        fontSize = 18.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
 
                     val priceText = listing.price?.let {
@@ -2447,22 +2465,18 @@ fun ListingDetailsDialog(
                         color = MaterialTheme.colorScheme.primary
                     )
 
-                    val media = getShortGrade(listing.condition)
-                    val sleeve = getShortGrade(listing.sleeve_condition)
-                    val gradeText = if (sleeve == "Not Graded" || sleeve.isEmpty()) "Media: $media" else "Media: $media • Sleeve: $sleeve"
-
-                    Text(text = gradeText, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-
                     if (listing.comments.isNotBlank()) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         Text(text = "Comments / Description:", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                         Text(text = listing.comments, fontSize = 14.sp)
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                }
 
+                    HorizontalDivider()
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedButton(
@@ -2478,7 +2492,6 @@ fun ListingDetailsDialog(
                             Text("View")
                         }
                     }
-                }
             }
         }
     }

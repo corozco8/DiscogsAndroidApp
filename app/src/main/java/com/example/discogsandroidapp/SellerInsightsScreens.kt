@@ -283,7 +283,7 @@ fun InventoryAgingScreen(
                     )
                 }
             },
-            modifier = Modifier
+            modifier = Modifier.keyboardInputArea()
                 .fillMaxWidth()
                 .padding(
                     horizontal = 16.dp,
@@ -443,6 +443,7 @@ fun SalesAnalyticsScreen(
         mutableStateOf(windows[1])
     }
 
+    val historyIncomplete = syncState == null || syncState.nextBackfillPage != null
     val now = System.currentTimeMillis()
     val startOfCurrentYear =
         Calendar.getInstance().apply {
@@ -592,12 +593,24 @@ fun SalesAnalyticsScreen(
                             selectedWindow == window,
                         onClick = {
                             selectedWindow = window
+                            if (window.label == "All" && historyIncomplete) onRefreshClick()
                         },
                         label = {
                             Text(window.label)
                         }
                     )
                 }
+            }
+        }
+
+        if (selectedWindow.label == "All" && historyIncomplete) {
+            item {
+                Text(
+                    "Partial totals — full order history has not finished downloading. " +
+                        "Tap refresh to resume. All-time totals will update as pages arrive.",
+                    modifier = Modifier.padding(16.dp),
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
 
@@ -973,7 +986,7 @@ fun CustomerHistoryScreen(
                     Text("Search buyer username")
                 },
                 singleLine = true,
-                modifier = Modifier
+                modifier = Modifier.keyboardInputArea()
                     .fillMaxWidth()
                     .padding(
                         horizontal = 16.dp,

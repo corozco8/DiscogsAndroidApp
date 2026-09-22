@@ -171,118 +171,145 @@ fun OrderDetailScreen(
                             containerColor = MaterialTheme.colorScheme.surface
                         )
                     ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AsyncImage(
-                                model = item.release?.thumbnail
-                                    ?: "https://via.placeholder.com/150",
-                                contentDescription = "Thumbnail",
-                                modifier = Modifier
-                                    .size(64.dp)
-                            )
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = item.release?.description
-                                        ?: item.release?.title
-                                        ?: "Unknown Item",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = item.release?.thumbnail
+                                        ?: "https://via.placeholder.com/150",
+                                    contentDescription = "Thumbnail",
+                                    modifier = Modifier
+                                        .size(64.dp)
                                 )
 
-                                Spacer(modifier = Modifier.height(5.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
 
-                                val recordGrade = item.media_condition ?: item.condition
-                                val sleeveGrade = item.sleeve_condition
-                                val conditionText = buildString {
-                                    if (!recordGrade.isNullOrBlank()) {
-                                        append("Media: ")
-                                        append(recordGrade)
-                                    }
-                                    if (!sleeveGrade.isNullOrBlank()) {
-                                        if (isNotEmpty()) append("  •  ")
-                                        append("Sleeve: ")
-                                        append(sleeveGrade)
-                                    }
-                                }
-
-                                if (conditionText.isNotBlank()) {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = conditionText,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        text = item.release?.description
+                                            ?: item.release?.title
+                                            ?: "Unknown Item",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                }
 
-                                val dateListed = item.posted ?: item.date_added
-                                dateListed?.let { rawDate ->
-                                    val compactDate = rawDate.take(10)
-                                    val displayDate =
-                                        try {
-                                            val parsed =
-                                                SimpleDateFormat(
-                                                    "yyyy-MM-dd",
-                                                    Locale.US
-                                                ).parse(compactDate)
+                                    Spacer(modifier = Modifier.height(5.dp))
 
-                                            if (parsed != null) {
-                                                SimpleDateFormat(
-                                                    "MMM d, yyyy",
-                                                    Locale.US
-                                                ).format(parsed)
-                                            } else {
+                                    val recordGrade = item.media_condition ?: item.condition
+                                    val sleeveGrade = item.sleeve_condition
+                                    val conditionText = buildString {
+                                        if (!recordGrade.isNullOrBlank()) {
+                                            append("Media: ")
+                                            append(recordGrade)
+                                        }
+                                        if (!sleeveGrade.isNullOrBlank()) {
+                                            if (isNotEmpty()) append("  •  ")
+                                            append("Sleeve: ")
+                                            append(sleeveGrade)
+                                        }
+                                    }
+
+                                    if (conditionText.isNotBlank()) {
+                                        Text(
+                                            text = conditionText,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    val dateListed = item.posted ?: item.date_added
+                                    dateListed?.let { rawDate ->
+                                        val compactDate = rawDate.take(10)
+                                        val displayDate =
+                                            try {
+                                                val parsed =
+                                                    SimpleDateFormat(
+                                                        "yyyy-MM-dd",
+                                                        Locale.US
+                                                    ).parse(compactDate)
+
+                                                if (parsed != null) {
+                                                    SimpleDateFormat(
+                                                        "MMM d, yyyy",
+                                                        Locale.US
+                                                    ).format(parsed)
+                                                } else {
+                                                    compactDate
+                                                }
+                                            } catch (_: Exception) {
                                                 compactDate
                                             }
-                                        } catch (_: Exception) {
-                                            compactDate
-                                        }
 
-                                    Text(
-                                        text = "Listed $displayDate",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.outline,
-                                        modifier = Modifier.padding(top = 2.dp)
-                                    )
-                                }
-
-                                item.comments
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let { comments ->
                                         Text(
-                                            text = comments,
+                                            text = "Listed $displayDate",
                                             fontSize = 11.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            color = MaterialTheme.colorScheme.outline,
                                             modifier = Modifier.padding(top = 2.dp)
                                         )
                                     }
 
-                                val currency = item.price?.currency ?: "$"
-                                val priceVal = item.price?.value ?: 0.00
-                                val formattedItemPrice = String.format(
-                                    java.util.Locale.getDefault(),
-                                    "%s %,.2f",
-                                    currency,
-                                    priceVal
-                                )
+                                    val currency = item.price?.currency ?: "$"
+                                    val priceVal = item.price?.value ?: 0.00
+                                    val formattedItemPrice = String.format(
+                                        java.util.Locale.getDefault(),
+                                        "%s %,.2f",
+                                        currency,
+                                        priceVal
+                                    )
 
-                                Text(
-                                    text = formattedItemPrice,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(top = 4.dp)
-                                )
+                                    Text(
+                                        text = formattedItemPrice,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
                             }
+
+                            // The public marketplace listing description belongs to
+                            // this specific order item. Display all of it across the
+                            // whole card instead of clipping it in the narrow column.
+                            item.comments
+                                ?.trim()
+                                ?.takeIf { it.isNotEmpty() }
+                                ?.let { comment ->
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                        color = MaterialTheme.colorScheme.outlineVariant
+                                    )
+
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(
+                                                start = 12.dp,
+                                                end = 12.dp,
+                                                top = 9.dp,
+                                                bottom = 12.dp
+                                            )
+                                    ) {
+                                        Text(
+                                            text = "Public listing comment",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                            text = comment,
+                                            fontSize = 12.sp,
+                                            lineHeight = 17.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
                         }
                     }
                 }
@@ -620,7 +647,7 @@ fun OrderDetailScreen(
                                 onValueChange = {
                                     messageText = it
                                 },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.keyboardInputArea().fillMaxWidth(),
                                 placeholder = {
                                     Text("Type a message...")
                                 },
@@ -649,7 +676,7 @@ fun OrderDetailScreen(
                                     onClick = { submitMessage() },
                                     enabled =
                                         messageText.isNotBlank() &&
-                                            !isSendingMessage,
+                                                !isSendingMessage,
                                     shape = RoundedCornerShape(50)
                                 ) {
                                     if (isSendingMessage) {

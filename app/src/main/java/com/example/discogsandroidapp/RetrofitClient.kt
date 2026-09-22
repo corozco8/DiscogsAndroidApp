@@ -13,6 +13,7 @@ object RetrofitClient {
     val apiService: DiscogsApiService by lazy {
         Retrofit.Builder()
             .baseUrl("https://api.discogs.com/")
+            .client(okhttp3.OkHttpClient.Builder().addInterceptor(DiscogsRequestPacing()).build())
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
             .create(DiscogsApiService::class.java)

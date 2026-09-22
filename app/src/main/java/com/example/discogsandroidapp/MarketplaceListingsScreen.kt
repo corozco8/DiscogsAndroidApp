@@ -124,6 +124,7 @@ fun MarketplaceListingsScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 Row(
@@ -173,7 +174,7 @@ fun MarketplaceListingsScreen(
                         onValueChange = { marketplaceSearchQuery = it },
                         placeholder = { Text("Search...") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.keyboardInputArea().weight(1f),
                         leadingIcon = {
                             IconButton(
                                 onClick = {

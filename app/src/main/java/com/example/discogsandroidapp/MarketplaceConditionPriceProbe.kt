@@ -130,7 +130,9 @@ fun ReleasePriceSummary.withActiveMarketplacePrices(
         // New generic live-price maps used by every media/sleeve grade.
         activeMediaLowestPrices = prices.mediaLowest,
         activeMediaSleeveLowestPrices =
-            prices.mediaSleeveLowest
+            prices.mediaSleeveLowest,
+        activeMediaListingCounts = prices.mediaListingCounts,
+        activeMediaSleeveListingCounts = prices.mediaSleeveListingCounts
     )
 }
 
@@ -195,6 +197,7 @@ data class MarketplacePriceSample(
 fun evaluateMarketplaceConditionPriceSample(
     webView: WebView,
     acceptResult: () -> Boolean = { true },
+    excludedListingIds: Set<Long> = emptySet(),
     onResult: (MarketplacePriceSample) -> Unit
 ) {
     val script = """
@@ -386,19 +389,39 @@ fun evaluateMarketplaceConditionPriceSample(
             const result = {
                 media: {},
                 pairs: {},
+                mediaCounts: {},
+                pairCounts: {},
                 rowCount: rows.length,
                 emptyConfirmed: false
             };
 
+            const excludedListingIds = new Set(${excludedListingIds.joinToString(prefix = "[", postfix = "]")}.map(String));
+            const countedListings = new Set();
             rows.forEach(function(row) {
                 const media = getMediaCondition(row);
                 const sleeve = getSleeveCondition(row);
                 const price = getPrice(row);
                 if (!media || price === null) return;
 
+                // Responsive layouts may expose the same listing more than once.
+                const link = row.querySelector('a[href*="/sell/item/"]');
+                const match = link && (link.getAttribute('href') || '').match(/\/sell\/item\/(\d+)/);
+                const explicitId = row.getAttribute('data-listing-id') || row.getAttribute('data-item-id');
+                const listingId = match ? match[1] : (/^\d+$/.test(explicitId || '') ? explicitId : null);
+                // When excluding a seller inventory, unidentified rows cannot
+                // safely be treated as competitors.
+                if (excludedListingIds.size > 0 && (!listingId || excludedListingIds.has(listingId))) return;
+                if (listingId) {
+                    if (countedListings.has(listingId)) return;
+                    countedListings.add(listingId);
+                }
+
                 setMin(result.media, media, price);
+                result.mediaCounts[media] = (result.mediaCounts[media] || 0) + 1;
                 if (sleeve) {
                     setMin(result.pairs, media + '||' + sleeve, price);
+                    const pair = media + '||' + sleeve;
+                    result.pairCounts[pair] = (result.pairCounts[pair] || 0) + 1;
                 }
             });
 
@@ -438,13 +461,27 @@ fun evaluateMarketplaceConditionPriceSample(
                 }
             }
 
+            fun readCountMap(objectName: String): Map<String, Int> {
+                val source = json.optJSONObject(objectName) ?: return emptyMap()
+                return buildMap {
+                    val keys = source.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val count = source.optInt(key, 0)
+                        if (count > 0) put(key, count)
+                    }
+                }
+            }
+
             if (!acceptResult()) return@evaluateJavascript
 
             onResult(
                 MarketplacePriceSample(
                     prices = ActiveMarketplaceConditionPrices(
                         mediaLowest = readPriceMap("media"),
-                        mediaSleeveLowest = readPriceMap("pairs")
+                        mediaSleeveLowest = readPriceMap("pairs"),
+                        mediaListingCounts = readCountMap("mediaCounts"),
+                        mediaSleeveListingCounts = readCountMap("pairCounts")
                     ),
                     rowCount = json.optInt("rowCount", 0),
                     emptyConfirmed = json.optBoolean("emptyConfirmed", false)
@@ -515,6 +552,8 @@ fun beginMarketplacePriceScan(
                 append(key).append('=').append(value).append(';')
             }
             append('|').append(sample.emptyConfirmed)
+            append('|').append(sample.prices.mediaListingCounts.toSortedMap())
+            append('|').append(sample.prices.mediaSleeveListingCounts.toSortedMap())
         }
     }
 
