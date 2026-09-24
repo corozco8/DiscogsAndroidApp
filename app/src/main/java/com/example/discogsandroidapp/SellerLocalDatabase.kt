@@ -12,6 +12,8 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.Upsert
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "seller_inventory")
@@ -48,7 +50,8 @@ data class LocalOrderEntity(
     val feeValue: Double?,
     val totalValue: Double?,
     val currency: String,
-    val syncedAtEpochMs: Long
+    val syncedAtEpochMs: Long,
+    val buyerCountryCode: String? = null
 )
 
 @Entity(
@@ -66,7 +69,8 @@ data class LocalOrderItemEntity(
     val sleeveCondition: String?,
     val comments: String?,
     val priceValue: Double?,
-    val currency: String
+    val currency: String,
+    val listedAtEpochMs: Long? = null
 )
 
 @Entity(tableName = "seller_sync_state")
@@ -113,6 +117,18 @@ interface SellerLocalDao {
     @Query("SELECT * FROM seller_orders ORDER BY createdAtEpochMs DESC")
     fun observeOrders(): Flow<List<LocalOrderEntity>>
 
+    @Query("SELECT * FROM seller_orders WHERE orderId IN (:orderIds)")
+    suspend fun getOrderSnapshots(orderIds: List<String>): List<LocalOrderEntity>
+
+    @Query("SELECT * FROM seller_order_items WHERE orderId IN (:orderIds)")
+    suspend fun getOrderItemsSnapshots(orderIds: List<String>): List<LocalOrderItemEntity>
+
+    @Transaction
+    suspend fun saveOrderSnapshot(order: LocalOrderEntity, items: List<LocalOrderItemEntity>) {
+        upsertOrders(listOf(order))
+        replaceOrderItems(order.orderId, items)
+    }
+
     @Upsert
     suspend fun upsertOrders(orders: List<LocalOrderEntity>)
 
@@ -156,13 +172,20 @@ interface SellerLocalDao {
         LocalOrderItemEntity::class,
         LocalSyncStateEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class SellerLocalDatabase : RoomDatabase() {
     abstract fun sellerDao(): SellerLocalDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE seller_orders ADD COLUMN buyerCountryCode TEXT")
+                db.execSQL("ALTER TABLE seller_order_items ADD COLUMN listedAtEpochMs INTEGER")
+            }
+        }
+
         @Volatile
         private var INSTANCE: SellerLocalDatabase? = null
 
@@ -173,7 +196,7 @@ abstract class SellerLocalDatabase : RoomDatabase() {
                     SellerLocalDatabase::class.java,
                     "discogs_seller_local.db"
                 )
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_1_2)
                     .build()
                     .also { INSTANCE = it }
             }

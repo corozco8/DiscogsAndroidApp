@@ -120,6 +120,11 @@ class MainActivity : ComponentActivity() {
                     // Hoist the My Store list state above the navigation content so
                     // opening a release does not discard the user's scroll position.
                     val storeListState = rememberLazyListState()
+                    val ordersListState = rememberLazyListState()
+                    var ordersScrollIndex by remember { mutableStateOf(0) }
+                    var ordersScrollOffset by remember { mutableStateOf(0) }
+                    var ordersScrollAnchor by remember { mutableStateOf<String?>(null) }
+                    var restoreOrdersScroll by remember { mutableStateOf(false) }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
                     var marketplacePriceSummary by remember {
                         mutableStateOf<ReleasePriceSummary?>(null)
@@ -976,6 +981,18 @@ class MainActivity : ComponentActivity() {
                                                 state.orders.filter { matchesOrderStatus(it.status, viewModel.currentOrdersStatus) }
                                             )
 
+                                        LaunchedEffect(Unit) {
+                                            if (restoreOrdersScroll) {
+                                                val anchorIndex = visibleOrders.indexOfFirst { it.id == ordersScrollAnchor }
+                                                val targetIndex = if (anchorIndex >= 0) anchorIndex else
+                                                    ordersScrollIndex.coerceAtMost((visibleOrders.size - 1).coerceAtLeast(0))
+                                                ordersListState.scrollToItem(targetIndex, ordersScrollOffset)
+                                                restoreOrdersScroll = false
+                                            } else {
+                                                ordersListState.scrollToItem(0)
+                                            }
+                                        }
+
                                         val selectedStatus = viewModel.currentOrdersStatus.let { if (it == "All") "All Orders" else it }
                                         var filterExpanded by remember { mutableStateOf(false) }
                                         val orderStatuses = listOf(
@@ -1030,6 +1047,7 @@ class MainActivity : ComponentActivity() {
 
                                             OrdersScreen(
                                                 orders = visibleOrders,
+                                                listState = ordersListState,
                                                 isFetchingMore = state.isFetchingMore,
                                                 hasMore = state.hasMore,
                                                 onLoadMore = {
@@ -1038,6 +1056,10 @@ class MainActivity : ComponentActivity() {
                                                     )
                                                 },
                                                 onOrderClick = { selectedOrder ->
+                                                    ordersScrollIndex = ordersListState.firstVisibleItemIndex
+                                                    ordersScrollOffset = ordersListState.firstVisibleItemScrollOffset
+                                                    ordersScrollAnchor = visibleOrders.getOrNull(ordersScrollIndex)?.id
+                                                    restoreOrdersScroll = true
                                                     returnToSellerInbox = false
                                                     viewModel.navigateToOrderDetails(
                                                         order = selectedOrder,
@@ -1172,7 +1194,13 @@ class MainActivity : ComponentActivity() {
                                         val localOrderItems by sellerInsightsViewModel.orderItems.collectWhileStarted()
                                         val orderSyncState by sellerInsightsViewModel.orderSyncState.collectWhileStarted()
 
-                                        SalesAnalyticsScreen(
+                                        val localInventory by sellerInsightsViewModel.inventory.collectWhileStarted()
+                                        val inventorySyncState by sellerInsightsViewModel.inventorySyncState.collectWhileStarted()
+
+                                        SellerStatisticsScreen(
+                                            inventory = localInventory,
+                                            inventorySyncState = inventorySyncState,
+                                            profile = (profileUiState as? ProfileUiState.Success)?.profile,
                                             orders = localOrders,
                                             orderItems = localOrderItems,
                                             syncState = orderSyncState,

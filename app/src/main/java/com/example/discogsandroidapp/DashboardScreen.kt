@@ -239,7 +239,7 @@ fun ProfileDashboard(
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             MenuBrick(
-                title = "Sales & Profit Analytics",
+                title = "Seller Statistics",
                 icon = Icons.Default.Insights,
                 onClick = onSalesAnalyticsClick
             )

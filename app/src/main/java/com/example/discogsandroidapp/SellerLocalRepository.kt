@@ -32,8 +32,11 @@ class SellerLocalRepository(context: Context) {
     }
 
     suspend fun syncAll(token: String) {
+        val priorListingDates = dao.getInventorySnapshot()
+            .filter { it.listedDateIsExact && it.listedAtEpochMs > 0 }
+            .associate { it.listingId to it.listedAtEpochMs }
         syncInventory(token, force = false)
-        syncRecentOrders(token)
+        syncRecentOrders(token, priorListingDates = priorListingDates)
     }
 
     suspend fun syncInventory(token: String, force: Boolean = true) =
@@ -196,7 +199,8 @@ class SellerLocalRepository(context: Context) {
     suspend fun syncRecentOrders(
         token: String,
         recentPages: Int = 5,
-        backfillPagesPerRun: Int = Int.MAX_VALUE
+        backfillPagesPerRun: Int = Int.MAX_VALUE,
+        priorListingDates: Map<Long, Long> = emptyMap()
     ) = ordersSyncMutex.withLock {
         require(token.isNotBlank()) {
             "Discogs token is missing"
@@ -224,7 +228,7 @@ class SellerLocalRepository(context: Context) {
                     ?: 1
 
             persistOrders(
-                response.orders.orEmpty()
+                response.orders.orEmpty(), priorListingDates
             )
 
             recentPage++
@@ -272,7 +276,7 @@ class SellerLocalRepository(context: Context) {
                 )
 
             persistOrders(
-                response.orders.orEmpty()
+                response.orders.orEmpty(), priorListingDates
             )
 
             backfillPage++
@@ -309,12 +313,21 @@ class SellerLocalRepository(context: Context) {
     }
 
     private suspend fun persistOrders(
-        orders: List<DiscogsOrder>
+        orders: List<DiscogsOrder>,
+        priorListingDates: Map<Long, Long> = emptyMap()
     ) {
         val now = System.currentTimeMillis()
+        val exactListingDates = dao.getInventorySnapshot()
+            .filter { it.listedDateIsExact && it.listedAtEpochMs > 0 }
+            .associate { it.listingId to it.listedAtEpochMs }
+        val orderIds = orders.mapNotNull { it.id }
+        val previousOrders = dao.getOrderSnapshots(orderIds).associateBy { it.orderId }
+        val previousItemsByOrder = dao.getOrderItemsSnapshots(orderIds).groupBy { it.orderId }
 
         orders.forEach { order ->
             val orderId = order.id ?: return@forEach
+            val previousOrder = previousOrders[orderId]
+            val previousItems = previousItemsByOrder[orderId].orEmpty().associateBy { it.itemKey }
             val createdAt =
                 parseDiscogsDate(order.created)
                     ?: 0L
@@ -332,26 +345,24 @@ class SellerLocalRepository(context: Context) {
                         }
                     ?: "USD"
 
-            dao.upsertOrders(
-                listOf(
-                    LocalOrderEntity(
-                        orderId = orderId,
-                        status = order.status.orEmpty(),
-                        createdRaw = order.created,
-                        createdAtEpochMs = createdAt,
-                        lastActivityRaw = order.lastActivity,
-                        lastActivityAtEpochMs = lastActivityAt,
-                        buyerId = order.buyer?.id,
-                        buyerUsername =
-                            order.buyer?.username
-                                ?: "Unknown buyer",
-                        shippingValue = order.shipping?.value,
-                        feeValue = order.fee?.value,
-                        totalValue = order.total?.value,
-                        currency = currency,
-                        syncedAtEpochMs = now
-                    )
-                )
+            val mappedOrder = LocalOrderEntity(
+                orderId = orderId,
+                status = order.status.orEmpty(),
+                createdRaw = order.created,
+                createdAtEpochMs = createdAt,
+                lastActivityRaw = order.lastActivity,
+                lastActivityAtEpochMs = lastActivityAt,
+                buyerId = order.buyer?.id,
+                buyerUsername =
+                    order.buyer?.username
+                        ?: "Unknown buyer",
+                shippingValue = order.shipping?.value,
+                feeValue = order.fee?.value,
+                totalValue = order.total?.value,
+                currency = currency,
+                syncedAtEpochMs = now,
+                buyerCountryCode = statisticsCountryFromAddress(order.shippingAddress)
+                    ?: previousOrder?.buyerCountryCode
             )
 
             val mappedItems =
@@ -382,13 +393,20 @@ class SellerLocalRepository(context: Context) {
                             priceValue = item.price?.value,
                             currency =
                                 item.price?.currency
-                                    ?: currency
+                                    ?: currency,
+                            listedAtEpochMs = listOfNotNull(
+                                parseDiscogsDate(item.date_added),
+                                parseDiscogsDate(item.posted),
+                                exactListingDates[item.id],
+                                priorListingDates[item.id],
+                                previousItems[itemKey]?.listedAtEpochMs
+                            ).filter { it > 0 }.minOrNull()
                         )
                     }
 
-            dao.replaceOrderItems(
-                orderId = orderId,
-                items = mappedItems
+            dao.saveOrderSnapshot(
+                order = mappedOrder,
+                items = if (order.items == null) previousItems.values.toList() else mappedItems
             )
         }
     }

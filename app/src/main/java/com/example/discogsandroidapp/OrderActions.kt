@@ -22,6 +22,44 @@ fun ReleaseViewModel.navigateToOrders(token: String) {
     fetchOrders(token)
 }
 
+internal data class OrdersReturnState(
+    val orderId: String?,
+    val orders: List<DiscogsOrder>,
+    val status: String,
+    val sortOrder: String,
+    val page: Int,
+    val pages: Int,
+    val total: Int
+)
+
+private fun ReleaseViewModel.restoreOrdersAfterUpdate(order: DiscogsOrder): Boolean {
+    val saved = ordersReturnState?.takeIf { it.orderId == order.id } ?: return false
+    ordersReturnState = null
+    invalidateNavigationRequests()
+    ordersRequestGeneration++
+    ordersFetchJob?.cancel()
+    isFetchingMoreOrders = false
+    currentOrdersStatus = saved.status
+    currentOrdersSortOrder = saved.sortOrder
+    val removed = !matchesOrderStatus(order.status, saved.status)
+    currentOrders.clear()
+    currentOrders.addAll(saved.orders.mapNotNull {
+        if (it.id != order.id) it else if (removed) null else order
+    })
+    // Removing a row shifts server page boundaries. Re-read the last page
+    // before advancing, using the existing ID deduplication to avoid gaps.
+    currentOrdersPage = if (removed && saved.page < saved.pages)
+        (saved.page - 1).coerceAtLeast(0) else saved.page
+    totalOrdersPages = saved.pages
+    totalOrdersItems = (saved.total - if (removed) 1 else 0).coerceAtLeast(0)
+    _uiState.value = ReleaseUiState.OrdersSuccess(
+        orders = currentOrders.toList(),
+        totalItems = totalOrdersItems,
+        hasMore = currentOrdersPage < totalOrdersPages
+    )
+    return true
+}
+
 internal suspend fun ReleaseViewModel.enrichOrderWithListingDates(
     order: DiscogsOrder,
     token: String
@@ -75,6 +113,16 @@ fun ReleaseViewModel.navigateToOrderDetails(
     order: DiscogsOrder,
     token: String
 ) {
+    val previous = _uiState.value as? ReleaseUiState.OrdersSuccess
+    ordersReturnState = previous?.let {
+        OrdersReturnState(order.id, it.orders.toList(), currentOrdersStatus,
+            currentOrdersSortOrder, currentOrdersPage, totalOrdersPages, totalOrdersItems)
+    }
+    if (previous != null) {
+        ordersRequestGeneration++
+        ordersFetchJob?.cancel()
+        isFetchingMoreOrders = false
+    }
     invalidateNavigationRequests()
     // Show the row data immediately, then replace it with the complete
     // order resource so shipping address, instructions, fees and
@@ -212,7 +260,11 @@ fun ReleaseViewModel.updateOrderStatus(
 
             if (newStatus.equals("In Progress", ignoreCase = true) &&
                 updatedOrder.status.equals("In Progress", ignoreCase = true)) {
-                fetchOrdersByStatus("In Progress", token)
+                val current = _uiState.value as? ReleaseUiState.OrderDetails
+                if (current?.order?.id != orderId) return@launch
+                if (!restoreOrdersAfterUpdate(updatedOrder)) {
+                    navigateToOrders(token)
+                }
                 return@launch
             }
 

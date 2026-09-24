@@ -958,6 +958,8 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         _uiState.value = ReleaseUiState.Idle
     }
 
+    internal var ordersReturnState: OrdersReturnState? = null
+
     internal val currentOrders =
         mutableListOf<DiscogsOrder>()
 
