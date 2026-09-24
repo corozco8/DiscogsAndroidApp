@@ -10,12 +10,24 @@ object RetrofitClient {
         ignoreUnknownKeys = true
     }
 
-    val apiService: DiscogsApiService by lazy {
-        Retrofit.Builder()
-            .baseUrl("https://api.discogs.com/")
-            .client(okhttp3.OkHttpClient.Builder().addInterceptor(DiscogsRequestPacing()).build())
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+    val apiService: DiscogsApiService by lazy { create(false) }
+    // Separate dispatcher keeps waiting sync requests out of the interactive call pool.
+    val backgroundApiService: DiscogsApiService by lazy { create(true) }
+
+    private fun create(background: Boolean): DiscogsApiService {
+        val client = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                chain.proceed(chain.request().newBuilder().tag(
+                    DiscogsRequestPriority::class.java,
+                    if (background) DiscogsRequestPriority.BACKGROUND else DiscogsRequestPriority.FOREGROUND
+                ).build())
+            }
+            .addInterceptor(DiscogsRequestPacing())
             .build()
-            .create(DiscogsApiService::class.java)
+        return Retrofit.Builder()
+            .baseUrl("https://api.discogs.com/")
+            .client(client)
+            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .build().create(DiscogsApiService::class.java)
     }
 }

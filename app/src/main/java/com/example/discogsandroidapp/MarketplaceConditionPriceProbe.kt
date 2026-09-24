@@ -21,99 +21,10 @@ import java.net.URLEncoder
  * markup or no matching listing exists, ReleasePriceSummary automatically
  * falls back to the app's existing pricing algorithm.
  */
-private const val PROBE_MARKETPLACE_PRICE_CACHE_TTL_MS = 15L * 60L * 1000L
 private const val MARKETPLACE_READY_SCAN_DEADLINE_MS = 7_000L
 private const val MARKETPLACE_READY_SCAN_INTERVAL_MS = 300L
 private const val MARKETPLACE_MIN_SETTLE_MS = 900L
 private const val MARKETPLACE_STABLE_SAMPLES_REQUIRED = 2
-
-enum class MarketplaceUiPriceStatus {
-    LOADING,
-    CACHED,
-    FRESH,
-    PARTIAL,
-    NO_MATCH,
-    FAILED
-}
-
-data class MarketplacePriceSnapshot(
-    val releaseId: Long,
-    val currency: String = "USD",
-    val prices: ActiveMarketplaceConditionPrices,
-    val updatedAtMillis: Long,
-    val pagesChecked: Set<Int> = setOf(1),
-    val complete: Boolean = true
-)
-
-private data class MarketplacePriceCacheKey(
-    val releaseId: Long,
-    val currency: String
-)
-
-private val marketplaceConditionPriceCache =
-    mutableMapOf<MarketplacePriceCacheKey, MarketplacePriceSnapshot>()
-
-fun getCachedMarketplacePriceSnapshot(
-    releaseId: Long,
-    currency: String = "USD"
-): MarketplacePriceSnapshot? {
-    val now = System.currentTimeMillis()
-    val key = MarketplacePriceCacheKey(
-        releaseId = releaseId,
-        currency = currency.uppercase()
-    )
-
-    synchronized(marketplaceConditionPriceCache) {
-        val entry = marketplaceConditionPriceCache[key]
-            ?: return null
-
-        if (now - entry.updatedAtMillis > PROBE_MARKETPLACE_PRICE_CACHE_TTL_MS) {
-            marketplaceConditionPriceCache.remove(key)
-            return null
-        }
-
-        return entry
-    }
-}
-
-fun getCachedMarketplaceConditionPrices(
-    releaseId: Long,
-    currency: String = "USD"
-): ActiveMarketplaceConditionPrices? {
-    return getCachedMarketplacePriceSnapshot(
-        releaseId = releaseId,
-        currency = currency
-    )?.prices
-}
-
-fun cacheMarketplaceConditionPrices(
-    releaseId: Long,
-    prices: ActiveMarketplaceConditionPrices,
-    currency: String = "USD",
-    pagesChecked: Set<Int> = setOf(1),
-    complete: Boolean = true
-): MarketplacePriceSnapshot {
-    val normalizedCurrency = currency.uppercase()
-    val key = MarketplacePriceCacheKey(
-        releaseId = releaseId,
-        currency = normalizedCurrency
-    )
-
-    val snapshot = MarketplacePriceSnapshot(
-        releaseId = releaseId,
-        currency = normalizedCurrency,
-        prices = prices,
-        updatedAtMillis = System.currentTimeMillis(),
-        pagesChecked = pagesChecked,
-        complete = complete
-    )
-
-    synchronized(marketplaceConditionPriceCache) {
-        marketplaceConditionPriceCache[key] = snapshot
-    }
-
-    return snapshot
-}
 
 fun ReleasePriceSummary.withActiveMarketplacePrices(
     prices: ActiveMarketplaceConditionPrices
@@ -191,7 +102,8 @@ fun marketplaceReleaseListingsUrl(
 data class MarketplacePriceSample(
     val prices: ActiveMarketplaceConditionPrices,
     val rowCount: Int,
-    val emptyConfirmed: Boolean
+    val emptyConfirmed: Boolean,
+    val blocked: Boolean = false
 )
 
 fun evaluateMarketplaceConditionPriceSample(
@@ -427,6 +339,7 @@ fun evaluateMarketplaceConditionPriceSample(
 
             if (rows.length === 0) {
                 const bodyText = (document.body && document.body.innerText || '').toLowerCase();
+                result.blocked = /verify you are human|checking your browser|access denied|just a moment|enable javascript and cookies to continue/.test(bodyText);
                 result.emptyConfirmed =
                     /no (?:items|copies|listings).*for sale/.test(bodyText) ||
                     /0 copies for sale/.test(bodyText);
@@ -441,6 +354,7 @@ fun evaluateMarketplaceConditionPriceSample(
 
         try {
             if (rawResult.isNullOrBlank() || rawResult == "null") {
+                onResult(MarketplacePriceSample(ActiveMarketplaceConditionPrices(), 0, false))
                 return@evaluateJavascript
             }
 
@@ -484,12 +398,12 @@ fun evaluateMarketplaceConditionPriceSample(
                         mediaSleeveListingCounts = readCountMap("pairCounts")
                     ),
                     rowCount = json.optInt("rowCount", 0),
-                    emptyConfirmed = json.optBoolean("emptyConfirmed", false)
+                    emptyConfirmed = json.optBoolean("emptyConfirmed", false),
+                    blocked = json.optBoolean("blocked", false)
                 )
             )
         } catch (_: Exception) {
-            // Best-effort live pricing. The caller's deadline/fallback state
-            // decides whether to keep waiting or use the estimate.
+            onResult(MarketplacePriceSample(ActiveMarketplaceConditionPrices(), 0, false))
         }
     }
 }
@@ -568,7 +482,7 @@ fun beginMarketplacePriceScan(
         if (finished || !isCurrent()) {
             finished = true
         } else if (!marketplaceUrlBelongsToRelease(webView.url, releaseId)) {
-            finish(MarketplaceUiPriceStatus.FAILED)
+            finish(MarketplaceUiPriceStatus.UNREADABLE)
         } else {
             evaluateMarketplaceConditionPriceSample(
                 webView = webView,
@@ -600,11 +514,13 @@ fun beginMarketplacePriceScan(
                     stableSamples >= MARKETPLACE_STABLE_SAMPLES_REQUIRED
 
                 when {
+                    sample.blocked -> finish(MarketplaceUiPriceStatus.BLOCKED)
                     sample.emptyConfirmed && stableSamples >= 1 -> {
+                        cacheMarketplaceConditionPrices(releaseId, ActiveMarketplaceConditionPrices())
                         finish(MarketplaceUiPriceStatus.NO_MATCH)
                     }
 
-                    stableEnough -> {
+                    stableEnough && lastGoodPrices != null -> {
                         lastGoodPrices?.let { prices ->
                             cacheMarketplaceConditionPrices(
                                 releaseId = releaseId,
@@ -622,7 +538,7 @@ fun beginMarketplacePriceScan(
                             if (lastGoodPrices != null) {
                                 MarketplaceUiPriceStatus.PARTIAL
                             } else {
-                                MarketplaceUiPriceStatus.FAILED
+                                MarketplaceUiPriceStatus.UNREADABLE
                             }
                         )
                     }

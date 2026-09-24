@@ -1,6 +1,7 @@
 package com.example.discogsandroidapp
 
 /** A snapshot from one scan, in USD, excluding shipping. Never merge separate scans. */
+@kotlinx.serialization.Serializable
 data class ActiveMarketplaceConditionPrices(
     val mediaLowest: Map<String, Double> = emptyMap(),
     val mediaSleeveLowest: Map<String, Double> = emptyMap(),

@@ -41,80 +41,14 @@ fun MarketplaceListingsScreen(
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
     var marketplaceSearchQuery by remember(releaseId) { mutableStateOf("") }
-    var liveMarketplacePrices by remember(releaseId) {
-        mutableStateOf(getCachedMarketplaceConditionPrices(releaseId))
-    }
-    var marketplacePricingStatus by remember(releaseId) {
-        mutableStateOf(
-            if (liveMarketplacePrices != null) {
-                MarketplaceUiPriceStatus.CACHED
-            } else {
-                MarketplaceUiPriceStatus.LOADING
-            }
-        )
-    }
-    var effectivePriceSummary by remember(releaseId) {
-        mutableStateOf(
-            liveMarketplacePrices?.let { prices ->
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(prices)
-            } ?: priceSummary
-        )
-    }
-    var webViewRef by remember(releaseId) {
-        mutableStateOf<WebView?>(null)
-    }
-
+    val pricing = rememberMarketplacePricing(releaseId)
+    val effectivePriceSummary = pricing.prices?.let {
+        (priceSummary ?: ReleasePriceSummary()).withActiveMarketplacePrices(it)
+    } ?: priceSummary
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val scanner = remember { GmsBarcodeScanning.getClient(context) }
-    val webViewActive = remember(releaseId) { AtomicBoolean(true) }
-    val scanGeneration = remember(releaseId) { intArrayOf(0) }
-
-    fun applyMarketplacePrices(
-        prices: ActiveMarketplaceConditionPrices
-    ) {
-        liveMarketplacePrices = prices
-        effectivePriceSummary =
-            (priceSummary ?: ReleasePriceSummary())
-                .withActiveMarketplacePrices(prices)
-    }
-
-    LaunchedEffect(releaseId) {
-        getCachedMarketplacePriceSnapshot(releaseId)?.let { snapshot ->
-            liveMarketplacePrices = snapshot.prices
-            marketplacePricingStatus = MarketplaceUiPriceStatus.CACHED
-            effectivePriceSummary =
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(snapshot.prices)
-        }
-    }
-
-    // A late static price-summary response must not erase live marketplace
-    // prices already discovered for this release.
-    LaunchedEffect(priceSummary, releaseId, liveMarketplacePrices) {
-        effectivePriceSummary =
-            liveMarketplacePrices?.let { prices ->
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(prices)
-            } ?: priceSummary
-    }
-
-    DisposableEffect(releaseId) {
-        webViewActive.set(true)
-
-        onDispose {
-            webViewActive.set(false)
-            scanGeneration[0]++
-            webViewRef?.apply {
-                stopLoading()
-                webViewClient = WebViewClient()
-                destroy()
-            }
-            webViewRef = null
-        }
-    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(
@@ -247,116 +181,20 @@ fun MarketplaceListingsScreen(
             }
         }
 
-        AndroidView(
-            modifier = Modifier.weight(1f),
-            factory = { androidContext ->
-                WebView(androidContext).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(
-                            view: WebView,
-                            url: String?,
-                            favicon: Bitmap?
-                        ) {
-                            super.onPageStarted(view, url, favicon)
-                            // Invalidate callbacks scheduled by the previous page.
-                            scanGeneration[0]++
-                            marketplacePricingStatus =
-                                if (liveMarketplacePrices != null) {
-                                    MarketplaceUiPriceStatus.CACHED
-                                } else {
-                                    MarketplaceUiPriceStatus.LOADING
-                                }
-                            val navigationGeneration = scanGeneration[0]
-                            view.postDelayed(
-                                {
-                                    if (
-                                        webViewActive.get() &&
-                                        navigationGeneration == scanGeneration[0] &&
-                                        marketplacePricingStatus == MarketplaceUiPriceStatus.LOADING
-                                    ) {
-                                        marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                                    }
-                                },
-                                10_000L
-                            )
-                        }
-
-                        override fun onReceivedHttpError(
-                            view: WebView,
-                            request: WebResourceRequest,
-                            errorResponse: WebResourceResponse
-                        ) {
-                            super.onReceivedHttpError(view, request, errorResponse)
-                            if (request.isForMainFrame) {
-                                marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                            }
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView,
-                            request: WebResourceRequest,
-                            error: WebResourceError
-                        ) {
-                            super.onReceivedError(view, request, error)
-                            if (request.isForMainFrame) {
-                                marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                            }
-                        }
-
-                        override fun onPageFinished(
-                            view: WebView,
-                            url: String
-                        ) {
-                            super.onPageFinished(view, url)
-
-
-                            // Never let navigation to another Discogs release
-                            // contaminate this screen's recommendation data.
-                            if (!marketplaceUrlBelongsToRelease(url, releaseId)) {
-                                return
-                            }
-
-                            val generation = scanGeneration[0]
-
-                            beginMarketplacePriceScan(
-                                webView = view,
-                                releaseId = releaseId,
-                                isCurrent = {
-                                    webViewActive.get() &&
-                                            generation == scanGeneration[0] &&
-                                            marketplaceUrlBelongsToRelease(
-                                                view.url,
-                                                releaseId
-                                            )
-                                },
-                                onPrices = ::applyMarketplacePrices,
-                                onStatus = { status ->
-                                    if (
-                                        webViewActive.get() &&
-                                        generation == scanGeneration[0]
-                                    ) {
-                                        marketplacePricingStatus = status
-                                    }
-                                }
-                            )
-                        }
-                    }
-
-                    loadUrl(marketplaceReleaseListingsUrl(releaseId))
-                    webViewRef = this
-                }
-            },
-            update = { webView ->
-                webViewRef = webView
+        MarketplacePricingStatus(pricing)
+        if (pricing.ready) {
+            key(releaseId, pricing.attempt) {
+                AndroidView(
+                    modifier = Modifier.weight(1f),
+                    factory = { androidContext -> pricing.createWebView(androidContext, hidden = false) }
+                )
             }
-        )
+        }
     }
 
     if (showSellDialog) {
         AddListingDialog(
+            pricingMessage = pricing.message,
             priceSummary = effectivePriceSummary ?: priceSummary,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeveCondition, comments ->

@@ -19,20 +19,37 @@ class SellerLocalRepository(context: Context) {
     val inventorySyncState = dao.observeSyncState(INVENTORY_SYNC_KEY)
     val orderSyncState = dao.observeSyncState(ORDERS_SYNC_KEY)
 
+    suspend fun removeLocalListing(id: Long) = inventoryCommitMutex.withLock {
+        inventoryGeneration++
+        inventoryChanges[id] = inventoryGeneration
+        dao.deleteInventoryListing(id)
+    }
+
+    suspend fun updateLocalListing(id: Long, price: Double, media: String, sleeve: String, comments: String) = inventoryCommitMutex.withLock {
+        inventoryGeneration++
+        inventoryChanges[id] = inventoryGeneration
+        dao.updateInventoryListing(id, price, media, sleeve, comments)
+    }
+
     suspend fun syncAll(token: String) {
-        syncInventory(token)
+        syncInventory(token, force = false)
         syncRecentOrders(token)
     }
 
-    suspend fun syncInventory(token: String) =
+    suspend fun syncInventory(token: String, force: Boolean = true) =
         inventorySyncMutex.withLock {
             require(token.isNotBlank()) {
                 "Discogs token is missing"
             }
 
+            if (!force) {
+                val lastSync = dao.getSyncState(INVENTORY_SYNC_KEY)?.lastSuccessfulSyncAtEpochMs ?: 0L
+                if (System.currentTimeMillis() - lastSync in 0 until 5 * 60_000L) return@withLock
+            }
+            val generation = inventoryCommitMutex.withLock { inventoryGeneration }
             val authHeader = "Discogs token=$token"
             val identity =
-                RetrofitClient.apiService.getIdentity(authHeader)
+                RetrofitClient.backgroundApiService.getIdentity(authHeader)
 
             val existingById =
                 dao.getInventorySnapshot()
@@ -47,7 +64,7 @@ class SellerLocalRepository(context: Context) {
 
             do {
                 val response =
-                    RetrofitClient.apiService.getInventory(
+                    RetrofitClient.backgroundApiService.getInventory(
                         username = identity.username,
                         authHeader = authHeader,
                         status = "For Sale",
@@ -154,8 +171,13 @@ class SellerLocalRepository(context: Context) {
             // Publish the complete inventory snapshot atomically only after every
             // network page has succeeded. A failed/partial sync leaves the previous
             // valid local snapshot untouched.
+            inventoryCommitMutex.withLock {
+            val changedIds = inventoryChanges.filterValues { it > generation }.keys
+            val latest = if (changedIds.isEmpty()) emptyList() else dao.getInventorySnapshot().filter { it.listingId in changedIds }
+            val mergedSnapshot = completeSnapshot.filterNot { it.listingId in changedIds } +
+                latest.map { it.copy(lastSeenAtEpochMs = syncStartedAt) }
             dao.replaceInventorySnapshot(
-                listings = completeSnapshot,
+                listings = mergedSnapshot,
                 syncStartedAtEpochMs = syncStartedAt
             )
 
@@ -163,10 +185,12 @@ class SellerLocalRepository(context: Context) {
                 LocalSyncStateEntity(
                     key = INVENTORY_SYNC_KEY,
                     lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
-                    itemCount = syncedCount,
+                    itemCount = mergedSnapshot.size,
                     note = "Active For Sale inventory"
                 )
             )
+            inventoryChanges.clear()
+        }
         }
 
     suspend fun syncRecentOrders(
@@ -186,7 +210,7 @@ class SellerLocalRepository(context: Context) {
         var recentPage = 1
         do {
             val response =
-                RetrofitClient.apiService.getOrders(
+                RetrofitClient.backgroundApiService.getOrders(
                     token = authHeader,
                     status = null,
                     page = recentPage,
@@ -239,7 +263,7 @@ class SellerLocalRepository(context: Context) {
             pagesBackfilled < backfillPagesPerRun
         ) {
             val response =
-                RetrofitClient.apiService.getOrders(
+                RetrofitClient.backgroundApiService.getOrders(
                     token = authHeader,
                     status = null,
                     page = backfillPage,
@@ -371,6 +395,9 @@ class SellerLocalRepository(context: Context) {
 
     companion object {
         private val inventorySyncMutex = Mutex()
+        private val inventoryCommitMutex = Mutex()
+        private var inventoryGeneration = 0L
+        private val inventoryChanges = mutableMapOf<Long, Long>()
         private val ordersSyncMutex = Mutex()
 
         const val INVENTORY_SYNC_KEY = "inventory"

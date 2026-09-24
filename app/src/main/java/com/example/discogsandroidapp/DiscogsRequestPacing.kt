@@ -19,16 +19,22 @@ internal fun discogsRetryDelay(header: String?, now: Long): Long {
 internal class DiscogsRequestPacing : Interceptor {
     companion object {
         private val lock = Any()
+        private val turns = RequestTurnQueue()
         private var nextRequestAt = 0L
         private var blockedUntil = 0L
     }
     override fun intercept(chain: Interceptor.Chain): Response {
+        val ticket = synchronized(lock) { turns.add(chain.request().tag(DiscogsRequestPriority::class.java) == DiscogsRequestPriority.BACKGROUND) }
+        try {
         while (true) {
             if (chain.call().isCanceled()) throw IOException("Canceled")
             val wait = synchronized(lock) {
                 val now = System.currentTimeMillis()
-                val remaining = maxOf(nextRequestAt, blockedUntil) - now
-                if (remaining <= 0) nextRequestAt = now + 1_500
+                val remaining = if (!turns.isNext(ticket)) 100L else maxOf(nextRequestAt, blockedUntil) - now
+                if (remaining <= 0) {
+                    turns.take(ticket)
+                    nextRequestAt = now + 1_500
+                }
                 remaining
             }
             if (wait <= 0) break
@@ -36,6 +42,7 @@ internal class DiscogsRequestPacing : Interceptor {
                 Thread.currentThread().interrupt(); throw IOException("Interrupted while waiting for Discogs", e)
             }
         }
+        } finally { synchronized(lock) { turns.remove(ticket) } }
         val response = chain.proceed(chain.request())
         if (response.code == 429 || response.header("X-Discogs-Ratelimit-Remaining")?.toIntOrNull() == 0) {
             val now = System.currentTimeMillis()

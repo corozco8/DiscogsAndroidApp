@@ -84,6 +84,12 @@ interface SellerLocalDao {
     @Query("SELECT * FROM seller_inventory ORDER BY listedAtEpochMs ASC, listingId ASC")
     fun observeInventory(): Flow<List<LocalInventoryListingEntity>>
 
+    @Query("DELETE FROM seller_inventory WHERE listingId = :id")
+    suspend fun deleteInventoryListing(id: Long)
+
+    @Query("UPDATE seller_inventory SET priceValue = :price, mediaCondition = :media, sleeveCondition = :sleeve, comments = :comments WHERE listingId = :id")
+    suspend fun updateInventoryListing(id: Long, price: Double, media: String, sleeve: String, comments: String)
+
     @Query("SELECT * FROM seller_inventory")
     suspend fun getInventorySnapshot(): List<LocalInventoryListingEntity>
 

@@ -54,93 +54,16 @@ fun ReleaseDetails(
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
     val releaseId = release.id
-    var liveMarketplacePrices by remember(releaseId) {
-        mutableStateOf(
-            releaseId?.let { getCachedMarketplaceConditionPrices(it) }
-        )
-    }
-    var marketplacePricingStatus by remember(releaseId) {
-        mutableStateOf(
-            if (liveMarketplacePrices != null) {
-                MarketplaceUiPriceStatus.CACHED
-            } else {
-                MarketplaceUiPriceStatus.LOADING
-            }
-        )
-    }
-    var verificationPromptDismissed by remember(releaseId) {
-        mutableStateOf(false)
-    }
-
-    var effectivePriceSummary by remember(releaseId) {
-        mutableStateOf(
-            if (liveMarketplacePrices != null) {
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(liveMarketplacePrices!!)
-            } else {
-                priceSummary
-            }
-        )
-    }
+    val pricing = rememberMarketplacePricing(releaseId)
+    val effectivePriceSummary = pricing.prices?.let {
+        (priceSummary ?: ReleasePriceSummary()).withActiveMarketplacePrices(it)
+    } ?: priceSummary
     var isRefreshing by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
-    var pricingWebView by remember(releaseId) {
-        mutableStateOf<WebView?>(null)
-    }
-    val pricingWebViewActive = remember(releaseId) { AtomicBoolean(true) }
-    val pricingScanGeneration = remember(releaseId) { intArrayOf(0) }
-
-    fun applyMarketplacePrices(
-        prices: ActiveMarketplaceConditionPrices
-    ) {
-        liveMarketplacePrices = prices
-        effectivePriceSummary =
-            (priceSummary ?: ReleasePriceSummary())
-                .withActiveMarketplacePrices(prices)
-    }
-
-    // Reuse a recent successful USD snapshot immediately on repeat visits.
-    LaunchedEffect(releaseId) {
-        releaseId?.let { id ->
-            getCachedMarketplacePriceSnapshot(id)?.let { snapshot ->
-                liveMarketplacePrices = snapshot.prices
-                marketplacePricingStatus = MarketplaceUiPriceStatus.CACHED
-                effectivePriceSummary =
-                    (priceSummary ?: ReleasePriceSummary())
-                        .withActiveMarketplacePrices(snapshot.prices)
-            }
-        }
-    }
-
-    // Static stats/suggestions may arrive after Release Details is already
-    // visible. Reapply the live/cached snapshot so it is never overwritten.
-    LaunchedEffect(priceSummary, releaseId, liveMarketplacePrices) {
-        effectivePriceSummary =
-            liveMarketplacePrices?.let { prices ->
-                (priceSummary ?: ReleasePriceSummary())
-                    .withActiveMarketplacePrices(prices)
-            } ?: priceSummary
-    }
-
-
-
-    DisposableEffect(releaseId) {
-        pricingWebViewActive.set(true)
-
-        onDispose {
-            pricingWebViewActive.set(false)
-            pricingScanGeneration[0]++
-            pricingWebView?.apply {
-                stopLoading()
-                webViewClient = WebViewClient()
-                destroy()
-            }
-            pricingWebView = null
-        }
-    }
 
     if (showSellDialog) {
         AddListingDialog(
+            pricingMessage = pricing.message,
             // The loaded release metadata is authoritative even if the
             // optional price summary is still being fetched.
             priceSummary = (effectivePriceSummary ?: priceSummary
@@ -158,123 +81,11 @@ fun ReleaseDetails(
 
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (releaseId != null) {
-            key(releaseId) {
+        if (releaseId != null && pricing.ready && pricing.needsLoad) {
+            key(releaseId, pricing.attempt) {
                 AndroidView(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .alpha(0.01f),
-                    factory = { androidContext ->
-                        WebView(androidContext).apply {
-                            isClickable = false
-                            isFocusable = false
-                            isFocusableInTouchMode = false
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.loadsImagesAutomatically = false
-                            settings.blockNetworkImage = true
-
-                            webViewClient = object : WebViewClient() {
-                                override fun onPageStarted(
-                                    view: WebView,
-                                    url: String?,
-                                    favicon: Bitmap?
-                                ) {
-                                    super.onPageStarted(view, url, favicon)
-                                    pricingScanGeneration[0]++
-
-                                    marketplacePricingStatus =
-                                        if (liveMarketplacePrices != null) {
-                                            MarketplaceUiPriceStatus.CACHED
-                                        } else {
-                                            MarketplaceUiPriceStatus.LOADING
-                                        }
-                                    val navigationGeneration = pricingScanGeneration[0]
-                                    view.postDelayed(
-                                        {
-                                            if (
-                                                pricingWebViewActive.get() &&
-                                                navigationGeneration == pricingScanGeneration[0] &&
-                                                marketplacePricingStatus == MarketplaceUiPriceStatus.LOADING
-                                            ) {
-                                                marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                                            }
-                                        },
-                                        10_000L
-                                    )
-                                }
-
-                                override fun onReceivedHttpError(
-                                    view: WebView,
-                                    request: WebResourceRequest,
-                                    errorResponse: WebResourceResponse
-                                ) {
-                                    super.onReceivedHttpError(view, request, errorResponse)
-                                    if (request.isForMainFrame) {
-                                        marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                                    }
-                                }
-
-                                override fun onReceivedError(
-                                    view: WebView,
-                                    request: WebResourceRequest,
-                                    error: WebResourceError
-                                ) {
-                                    super.onReceivedError(view, request, error)
-                                    if (request.isForMainFrame) {
-                                        marketplacePricingStatus = MarketplaceUiPriceStatus.FAILED
-                                    }
-                                }
-
-                                override fun onPageFinished(
-                                    view: WebView,
-                                    url: String
-                                ) {
-                                    super.onPageFinished(view, url)
-
-
-
-                                    if (!marketplaceUrlBelongsToRelease(url, releaseId)) {
-                                        return
-                                    }
-
-                                    val generation = pricingScanGeneration[0]
-
-                                    beginMarketplacePriceScan(
-                                        webView = view,
-                                        releaseId = releaseId,
-                                        isCurrent = {
-                                            pricingWebViewActive.get() &&
-                                                    generation == pricingScanGeneration[0] &&
-                                                    marketplaceUrlBelongsToRelease(
-                                                        view.url,
-                                                        releaseId
-                                                    )
-                                        },
-                                        onPrices = ::applyMarketplacePrices,
-                                        onStatus = { status ->
-                                            if (
-                                                pricingWebViewActive.get() &&
-                                                generation == pricingScanGeneration[0]
-                                            ) {
-                                                marketplacePricingStatus = status
-                                            }
-                                        }
-                                    )
-                                }
-                            }
-
-                            loadUrl(
-                                marketplaceReleaseListingsUrl(
-                                    releaseId
-                                )
-                            )
-                            pricingWebView = this
-                        }
-                    },
-                    update = { webView ->
-                        pricingWebView = webView
-                    }
+                    modifier = Modifier.matchParentSize().alpha(0.01f),
+                    factory = { context -> pricing.createWebView(context, hidden = true) }
                 )
             }
         }
@@ -283,15 +94,11 @@ fun ReleaseDetails(
             isRefreshing = isRefreshing,
             onRefresh = {
                 isRefreshing = true
-                liveMarketplacePrices = null
-                marketplacePricingStatus = MarketplaceUiPriceStatus.LOADING
-                effectivePriceSummary = priceSummary
-                pricingScanGeneration[0]++
-
                 if (onRefresh != null) {
+                    pricing.refreshOnNextVisit()
                     onRefresh.invoke()
                 } else {
-                    pricingWebView?.reload()
+                    pricing.refresh()
                 }
 
                 // If the caller performs a full release reload this screen will
@@ -745,6 +552,7 @@ private fun ReleaseInfoSection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddListingDialog(
+    pricingMessage: String = "",
     priceSummary: ReleasePriceSummary? = null,
     onDismiss: () -> Unit,
     onSave: (Double, String, String, String) -> Unit
@@ -915,6 +723,7 @@ fun AddListingDialog(
                 }
 
                 // 3. Price Field
+                if (pricingMessage.isNotBlank()) Text(pricingMessage, style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = price,
                     onValueChange = {
