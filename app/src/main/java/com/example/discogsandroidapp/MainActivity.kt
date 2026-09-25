@@ -104,22 +104,23 @@ class MainActivity : ComponentActivity() {
                     snackbarHost = { SnackbarHost(snackbarHostState) }
                 ) { innerPadding ->
                     val uiState by viewModel.uiState.collectWhileStarted()
-                    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
                     val storeVisible = uiState is ReleaseUiState.StoreLoading || uiState is ReleaseUiState.StoreSuccess
-                    LaunchedEffect(storeVisible, lifecycleOwner) {
-                        if (storeVisible) lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
-                            viewModel.observeStore()
-                        }
-                    }
                     val profileUiState by viewModel.profileUiState.collectWhileStarted()
                     val orderMessagesUiState by viewModel.orderMessagesUiState.collectWhileStarted()
 
                     var searchQuery by remember { mutableStateOf("") }
+                    LaunchedEffect(searchQuery, storeVisible) {
+                        if (storeVisible) {
+                            kotlinx.coroutines.delay(350)
+                            viewModel.setStoreQuery(searchQuery)
+                        }
+                    }
                     var storeSort by remember { mutableStateOf("listed") }
                     var storeSortOrder by remember { mutableStateOf("desc") }
                     // Hoist the My Store list state above the navigation content so
                     // opening a release does not discard the user's scroll position.
-                    val storeListState = rememberLazyListState()
+                    var storeVisit by remember { mutableStateOf(0) }
+                    val storeListState = key(storeVisit) { rememberLazyListState() }
                     val ordersListState = rememberLazyListState()
                     var ordersScrollIndex by remember { mutableStateOf(0) }
                     var ordersScrollOffset by remember { mutableStateOf(0) }
@@ -436,6 +437,13 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(innerPadding)
+                                // The order screen has its own Scaffold/TopAppBar.
+                                // Tell it the outer system-bar padding is already applied.
+                                .then(
+                                    if (uiState is ReleaseUiState.OrderDetails)
+                                        Modifier.consumeWindowInsets(innerPadding)
+                                    else Modifier
+                                )
                         ) {
                             // 1. ALWAYS VISIBLE Search Bar Header
                             val context = LocalContext.current
@@ -704,6 +712,8 @@ class MainActivity : ComponentActivity() {
                                                     profile = pState.profile,
 
                                                     onStoreClick = {
+                                                        // A new visit starts at row zero, even before live data arrives.
+                                                        storeVisit++
                                                         searchQuery = ""
                                                         viewModel.clearStoreSearch(token)
                                                     },
@@ -785,9 +795,6 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.StoreLoading -> CircularProgressIndicator()
 
                                     is ReleaseUiState.StoreSuccess -> {
-                                        LaunchedEffect(searchQuery) {
-                                            viewModel.setStoreQuery(searchQuery)
-                                        }
                                         val displayedStoreListings = state.listings
 
                                         StoreScreen(
@@ -795,7 +802,7 @@ class MainActivity : ComponentActivity() {
                                             token = token,
                                             listState = storeListState,
                                             totalItems = state.totalItems,
-                                            isFetchingMore = false,
+                                            isFetchingMore = state.isFetchingMore,
                                             onSortChanged = { sortField, sortOrder ->
                                                 storeSort = sortField
                                                 storeSortOrder = sortOrder
@@ -812,8 +819,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             },
                                             onLoadMore = {
-                                                // All active listings are available locally.
-
+                                                viewModel.loadNextPage(token)
                                             },
                                             onDeleteListing = { listingId ->
                                                 viewModel.deleteListing(listingId, token)
@@ -890,10 +896,11 @@ class MainActivity : ComponentActivity() {
                                                     sleeveCondition = sleeve,
                                                     comments = comments,
                                                     token = token,
-                                                    onSuccess = {
+                                                    onResult = { resultMessage ->
                                                         appScope.launch {
                                                             snackbarHostState.showSnackbar(
-                                                                message = "Successfully listed"
+                                                                message = resultMessage,
+                                                                duration = SnackbarDuration.Long
                                                             )
                                                         }
                                                     }

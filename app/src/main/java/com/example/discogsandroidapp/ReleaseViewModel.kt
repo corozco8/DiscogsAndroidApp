@@ -348,50 +348,85 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
     }
 
     private val localRepository = SellerLocalRepository(getApplication())
-    private val storeController = StoreInventoryController(getApplication(), localRepository, viewModelScope)
     private val currentListings = mutableListOf<InventoryListing>()
     private var currentSort = "listed"
     private var currentSortOrder = "desc"
     private var currentStoreQuery = ""
+    private var storeToken = ""
+    private var storePage = 0
+    private var storePages = 1
+    private var storeTotal = 0
+    private var storeFetching = false
+    private var storeRequestGeneration = 0
+    private var storeFetchJob: kotlinx.coroutines.Job? = null
 
     fun fetchStoreInventory(token: String, sort: String = "listed", sortOrder: String = "desc", reset: Boolean = true) {
-        invalidateNavigationRequests()
+        if (!reset && (storeFetching || storePage >= storePages)) return
+        if (reset) {
+            invalidateNavigationRequests()
+            storeRequestGeneration++
+            storeFetchJob?.cancel()
+            currentListings.clear()
+            storePage = 0
+            storePages = 1
+            storeTotal = 0
+            _uiState.value = ReleaseUiState.StoreLoading
+        }
+        storeToken = token
         currentSort = sort
         currentSortOrder = sortOrder
-        storeController.setQuery(currentStoreQuery, sort, sortOrder)
-        if (_uiState.value !is ReleaseUiState.StoreSuccess) _uiState.value = ReleaseUiState.StoreLoading
-        storeController.refresh(token, force = false)
-    }
-
-    suspend fun observeStore() {
-            storeController.state.collect { state ->
-                if (_uiState.value is ReleaseUiState.StoreLoading || _uiState.value is ReleaseUiState.StoreSuccess) {
-                    if (state.ready && state.query == StoreQuery(currentStoreQuery, currentSort, currentSortOrder)) {
-                        currentListings.clear()
-                        currentListings.addAll(state.listings)
-                        _uiState.value = ReleaseUiState.StoreSuccess(state.listings, state.listings.size, false, state.message)
-                    } else if (!state.ready && state.error != null) {
-                        _uiState.value = ReleaseUiState.Error(state.error)
-                    }
+        val generation = storeRequestGeneration
+        val navigation = navigationRequestGeneration
+        val requestedQuery = currentStoreQuery
+        val nextPage = storePage + 1
+        storeFetching = true
+        if (!reset) _uiState.value = ReleaseUiState.StoreSuccess(currentListings.toList(), storeTotal, true)
+        storeFetchJob = viewModelScope.launch {
+            try {
+                val username = currentUsername.takeIf { it.isNotBlank() }
+                    ?: RetrofitClient.apiService.getIdentity("Discogs token=$token").username.also { currentUsername = it }
+                val response = RetrofitClient.apiService.getInventory(
+                    username = username, authHeader = "Discogs token=$token", status = "For Sale",
+                    searchString = requestedQuery.takeIf { it.isNotBlank() }, sort = sort, sortOrder = sortOrder,
+                    page = nextPage, perPage = 100
+                )
+                if (generation != storeRequestGeneration || navigation != navigationRequestGeneration) return@launch
+                if (_uiState.value !is ReleaseUiState.StoreLoading && _uiState.value !is ReleaseUiState.StoreSuccess) return@launch
+                val ids = currentListings.map { it.id }.toMutableSet()
+                currentListings.addAll(response.listings.filter { ids.add(it.id) })
+                storePage = nextPage
+                storePages = response.pagination.pages.coerceAtLeast(1)
+                storeTotal = response.pagination.items
+                _uiState.value = ReleaseUiState.StoreSuccess(currentListings.toList(), storeTotal, false)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation == storeRequestGeneration && navigation == navigationRequestGeneration) {
+                    _uiState.value = ReleaseUiState.Error("Could not load live inventory. Please retry. " + (e.message ?: ""))
                 }
+            } finally {
+                if (generation == storeRequestGeneration) storeFetching = false
             }
+        }
     }
 
     fun setStoreQuery(query: String) {
-        currentStoreQuery = query
-        storeController.setQuery(query, currentSort, currentSortOrder)
+        if (currentStoreQuery == query.trim()) return
+        currentStoreQuery = query.trim()
+        if (_uiState.value is ReleaseUiState.StoreLoading || _uiState.value is ReleaseUiState.StoreSuccess) {
+            fetchStoreInventory(storeToken, currentSort, currentSortOrder)
+        }
     }
     fun searchStoreInventory(query: String, token: String) {
         currentStoreQuery = query.trim()
         fetchStoreInventory(token, currentSort, currentSortOrder)
     }
-    fun clearStoreSearch(token: String) {
-        currentStoreQuery = ""
-        fetchStoreInventory(token, currentSort, currentSortOrder)
-    }
+    fun clearStoreSearch(token: String) = searchStoreInventory("", token)
     fun restoreStoreInventory(token: String) = fetchStoreInventory(token, currentSort, currentSortOrder)
-    fun refreshStore() = storeController.refresh(BuildConfig.DISCOGS_TOKEN, force = true)
-    fun loadNextPage(token: String) = Unit
+    fun refreshStore() = fetchStoreInventory(storeToken.ifBlank { BuildConfig.DISCOGS_TOKEN }, currentSort, currentSortOrder)
+    fun loadNextPage(token: String) {
+        if (_uiState.value is ReleaseUiState.StoreSuccess) fetchStoreInventory(token, currentSort, currentSortOrder, reset = false)
+    }
 
     private fun removeFromAiCacheInBackground(
         listingIds: Collection<Long>
@@ -892,6 +927,8 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         }
     }
 
+    private val pendingListingReleases = mutableSetOf<Int>()
+
     fun createListing(
         releaseId: Int,
         price: Double,
@@ -899,56 +936,35 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         sleeveCondition: String,
         comments: String,
         token: String,
-        onSuccess: () -> Unit
+        onResult: (String) -> Unit
     ) {
-        Log.d(
-            "CREATE_LISTING",
-            ">>> createListing releaseId=$releaseId price=$price condition=$condition sleeve=$sleeveCondition"
-        )
-
-        if (!price.isFinite() || price <= 0.0) {
-            _uiState.value =
-                ReleaseUiState.Error(
-                    "Price must be a valid amount greater than $0.00."
-                )
+        if (releaseId <= 0 || !price.isFinite() || price <= 0.0 || condition.isBlank() || condition == "Not Graded") {
+            onResult("Choose a valid release, media condition and a price greater than $0.00.")
             return
         }
-
+        if (!pendingListingReleases.add(releaseId)) {
+            onResult("This release is already being submitted. Please wait for confirmation.")
+            return
+        }
         viewModelScope.launch {
             try {
-                val requestBody = CreateListingRequest(
-                    release_id = releaseId,
-                    condition = condition,
-                    sleeve_condition = sleeveCondition,
-                    price = price,
-                    comments = comments,
-                    status = "For Sale"
+                val request = CreateListingRequest(releaseId, condition, sleeveCondition, price, comments, "For Sale")
+                val result = createAndVerifyListing(
+                    request,
+                    create = { RetrofitClient.apiService.createListing("Discogs token=$token", it) },
+                    fetch = { RetrofitClient.apiService.getMarketplaceListing(it, "Discogs token=$token") },
+                    cache = { localRepository.cacheCreatedListing(it) }
                 )
-
-                val response = RetrofitClient.apiService.createListing(
-                    authHeader = "Discogs token=$token",
-                    request = requestBody
-                )
-
-                if (response.isSuccessful) {
-                    // The operation itself does not mutate navigation state, so
-                    // the seller stays wherever they are even if they navigated
-                    // while the network request was running.
-                    storeController.refresh(token, force = true)
+                onResult(result.userMessage())
+                // Cache/sync failures are not listing failures, and must not invite another POST.
+                if (result is ListingCreationResult.Verified) {
+                    if (_uiState.value is ReleaseUiState.StoreSuccess || _uiState.value is ReleaseUiState.StoreLoading) {
+                        fetchStoreInventory(token, currentSort, currentSortOrder)
+                    }
                     refreshAiCacheInBackground()
-                    onSuccess()
-                } else {
-                    val errorBody = response.errorBody()?.string()
-                    _uiState.value = ReleaseUiState.Error(
-                        "Failed to list item. HTTP Code: ${response.code()} – " +
-                                (errorBody ?: "no details")
-                    )
                 }
-            } catch (e: Exception) {
-                Log.e("CREATE_LISTING", "Listing creation failed", e)
-                _uiState.value = ReleaseUiState.Error(
-                    "Network error: ${e.message}"
-                )
+            } finally {
+                pendingListingReleases.remove(releaseId)
             }
         }
     }

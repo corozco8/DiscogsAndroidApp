@@ -40,7 +40,7 @@ internal object MarketplacePricingCache {
     suspend fun initialize(context: Context) = withContext(Dispatchers.IO) {
         ioMutex.withLock {
             if (loaded) return@withLock
-            file = AtomicFile(File(context.applicationContext.filesDir, "marketplace-prices-v1.json"))
+            file = AtomicFile(File(context.applicationContext.filesDir, "marketplace-prices-v2.json"))
             val restored = runCatching {
                 json.decodeFromString<List<MarketplacePriceSnapshot>>(file!!.openRead().bufferedReader().use { it.readText() })
             }.getOrDefault(emptyList())

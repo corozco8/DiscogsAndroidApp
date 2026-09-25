@@ -60,53 +60,78 @@ private fun ReleaseViewModel.restoreOrdersAfterUpdate(order: DiscogsOrder): Bool
     return true
 }
 
+private suspend fun ReleaseViewModel.loadSavedOrderDetails(order: DiscogsOrder): DiscogsOrder {
+    val dao = SellerLocalDatabase.getInstance(getApplication<android.app.Application>()).sellerDao()
+    val cachedItems = order.id?.let { dao.getOrderItemsSnapshots(listOf(it)) }.orEmpty()
+    val cachedByListing = cachedItems.filter { it.listingId != null }.associateBy { it.listingId }
+    val cachedByKey = cachedItems.associateBy { it.itemKey }
+    val inventory = dao.getInventorySnapshot().associateBy { it.listingId }
+    val savedDetails = OrderItemDetailsCache(getApplication<android.app.Application>()).read(
+        order.items.orEmpty().mapNotNull { it.id ?: it.id_string?.toLongOrNull() }
+    )
+    val updated = order.items.orEmpty().map { original ->
+        val item = mergeSavedOrderItem(original, savedDetails[original.id ?: original.id_string?.toLongOrNull()])
+        val id = item.id ?: item.id_string?.toLongOrNull()
+        val cached = cachedByListing[id] ?: cachedByKey[item.id_string]
+        val listing = inventory[id]
+        val date = cached?.listedAtEpochMs ?: listing?.takeIf { it.listedDateIsExact }?.listedAtEpochMs
+        val cachedDate = date?.takeIf { it > 0 }?.let {
+            java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US).format(java.util.Date(it))
+        }
+        item.copy(
+            posted = item.posted?.takeIf { it.isNotBlank() },
+            date_added = item.date_added?.takeIf { it.isNotBlank() } ?: cachedDate,
+            comments = item.comments?.takeIf { it.isNotBlank() }
+                ?: cached?.comments?.takeIf { it.isNotBlank() }
+                ?: listing?.comments?.takeIf { it.isNotBlank() }
+        )
+    }
+    return order.copy(items = updated)
+}
+
 internal suspend fun ReleaseViewModel.enrichOrderWithListingDates(
     order: DiscogsOrder,
-    token: String
+    token: String,
+    onPartial: (DiscogsOrder) -> Unit = {}
 ): DiscogsOrder = supervisorScope {
-    val authHeader = "Discogs token=$token"
-
-    val enrichedItems = order.items
-        .orEmpty()
-        .map { item ->
-            async {
-                // Order payloads do not always include the original
-                // marketplace posted timestamp. Fetch the listing only
-                // when that date is missing.
-                if (
-                    !item.posted.isNullOrBlank() ||
-                    !item.date_added.isNullOrBlank() ||
-                    item.id == null
-                ) {
-                    return@async item
-                }
-
+    val cache = OrderItemDetailsCache(getApplication<android.app.Application>())
+    val updated = loadSavedOrderDetails(order).items.orEmpty().toMutableList()
+    val saved = cache.read(updated.mapNotNull { it.id ?: it.id_string?.toLongOrNull() })
+    onPartial(order.copy(items = updated.toList()))
+    val permits = Semaphore(2)
+    updated.toList().mapIndexed { index, item ->
+        async {
+            val id = item.id ?: item.id_string?.toLongOrNull()
+            if (id == null || saved[id]?.isFresh(System.currentTimeMillis()) == true) return@async
+            if ((!item.posted.isNullOrBlank() || !item.date_added.isNullOrBlank()) && !item.comments.isNullOrBlank()) {
+                cache.save(SavedOrderItemDetails(id, item.posted, item.date_added, item.comments, System.currentTimeMillis()))
+                return@async
+            }
+            permits.withPermit {
                 try {
-                    val listing =
-                        RetrofitClient.apiService.getMarketplaceListing(
-                            listingId = item.id,
-                            authHeader = authHeader
-                        )
-
-                    item.copy(
-                        posted = listing.posted ?: item.posted,
-                        date_added = listing.dateAdded ?: item.date_added
+                    val listing = RetrofitClient.apiService.getMarketplaceListing(
+                        listingId = id, authHeader = "Discogs token=$token"
                     )
+                    updated[index] = item.copy(
+                        posted = item.posted?.takeIf { it.isNotBlank() } ?: listing.posted?.takeIf { it.isNotBlank() },
+                        date_added = item.date_added?.takeIf { it.isNotBlank() } ?: listing.dateAdded?.takeIf { it.isNotBlank() },
+                        comments = item.comments?.takeIf { it.isNotBlank() } ?: listing.comments.takeIf { it.isNotBlank() }
+                    )
+                    // Publish each completed lookup; large orders need not wait
+                    // for every listing before showing the first item's details.
+                    onPartial(order.copy(items = updated.toList()))
+                    val completed = updated[index]
+                    cache.save(SavedOrderItemDetails(id, completed.posted, completed.date_added,
+                        completed.comments, System.currentTimeMillis()))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.w(
-                        "ORDER_DETAILS",
-                        "Could not load listing date for listing ${item.id}",
-                        e
-                    )
-                    item
+                    Log.w("ORDER_DETAILS", "Could not load details for listing $id", e)
                 }
             }
         }
-        .awaitAll()
-
-    order.copy(items = enrichedItems)
+    }.awaitAll()
+    order.copy(items = updated.toList())
 }
 
 fun ReleaseViewModel.navigateToOrderDetails(
@@ -140,22 +165,42 @@ fun ReleaseViewModel.navigateToOrderDetails(
 
         viewModelScope.launch {
             try {
-                val fullOrder =
+                val savedOrder = loadSavedOrderDetails(order)
+                val visible = _uiState.value as? ReleaseUiState.OrderDetails
+                if (visible?.order?.id != orderId || visible.order.status != order.status) return@launch
+                _uiState.value = ReleaseUiState.OrderDetails(savedOrder)
+                val responseOrder =
                     RetrofitClient.apiService.getOrder(
                         orderId = orderId,
                         authHeader = "Discogs token=$token"
                     )
 
+                val fullOrder = loadSavedOrderDetails(responseOrder)
+
+                fun publishDetails(details: DiscogsOrder) {
+                    val current = _uiState.value as? ReleaseUiState.OrderDetails
+                    if (current?.order?.id == orderId && current.order.status == order.status) {
+                        _uiState.value = ReleaseUiState.OrderDetails(details)
+                    }
+                }
+                // Show full order comments immediately, before listing lookups.
+                publishDetails(fullOrder)
                 val enrichedOrder =
                     enrichOrderWithListingDates(
                         order = fullOrder,
-                        token = token
+                        token = token,
+                        onPartial = { details ->
+                            val current = _uiState.value as? ReleaseUiState.OrderDetails
+                            if (current?.order?.id == orderId && current.order.status == fullOrder.status) {
+                                _uiState.value = ReleaseUiState.OrderDetails(details)
+                            }
+                        }
                     )
 
                 val current =
                     _uiState.value as? ReleaseUiState.OrderDetails
 
-                if (current?.order?.id == orderId) {
+                if (current?.order?.id == orderId && current.order.status == fullOrder.status) {
                     _uiState.value =
                         ReleaseUiState.OrderDetails(
                             enrichedOrder

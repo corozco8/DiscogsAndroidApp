@@ -199,77 +199,95 @@ fun OrderDetailScreen(
 
                                     Spacer(modifier = Modifier.height(5.dp))
 
-                                    val recordGrade = item.media_condition ?: item.condition
-                                    val sleeveGrade = item.sleeve_condition
-                                    val conditionText = buildString {
-                                        if (!recordGrade.isNullOrBlank()) {
-                                            append("Media: ")
-                                            append(recordGrade)
-                                        }
-                                        if (!sleeveGrade.isNullOrBlank()) {
-                                            if (isNotEmpty()) append("  •  ")
-                                            append("Sleeve: ")
-                                            append(sleeveGrade)
-                                        }
-                                    }
-
-                                    if (conditionText.isNotBlank()) {
-                                        Text(
-                                            text = conditionText,
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    val dateListed = item.posted ?: item.date_added
-                                    dateListed?.let { rawDate ->
-                                        val compactDate = rawDate.take(10)
-                                        val displayDate =
-                                            try {
-                                                val parsed =
-                                                    SimpleDateFormat(
-                                                        "yyyy-MM-dd",
-                                                        Locale.US
-                                                    ).parse(compactDate)
-
-                                                if (parsed != null) {
-                                                    SimpleDateFormat(
-                                                        "MMM d, yyyy",
-                                                        Locale.US
-                                                    ).format(parsed)
-                                                } else {
-                                                    compactDate
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            val recordGrade = item.media_condition?.takeIf { it.isNotBlank() } ?: item.condition
+                                            val sleeveGrade = item.sleeve_condition
+                                            val conditionText = buildString {
+                                                if (!recordGrade.isNullOrBlank()) {
+                                                    append("Media: ")
+                                                    append(compactOrderCondition(recordGrade))
                                                 }
-                                            } catch (_: Exception) {
-                                                compactDate
+                                                if (!sleeveGrade.isNullOrBlank()) {
+                                                    if (isNotEmpty()) append("  •  ")
+                                                    append("Sleeve: ")
+                                                    append(compactOrderCondition(sleeveGrade))
+                                                }
                                             }
 
+                                            if (conditionText.isNotBlank()) {
+                                                Text(
+                                                    text = conditionText,
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+
+                                            val dateListed = item.posted?.takeIf { it.isNotBlank() } ?: item.date_added?.takeIf { it.isNotBlank() }
+                                            dateListed?.let { rawDate ->
+                                                val compactDate = rawDate.take(10)
+                                                val displayDate =
+                                                    try {
+                                                        val parsed =
+                                                            SimpleDateFormat(
+                                                                "yyyy-MM-dd",
+                                                                Locale.US
+                                                            ).parse(compactDate)
+
+                                                        if (parsed != null) {
+                                                            SimpleDateFormat(
+                                                                "MMM d, yyyy",
+                                                                Locale.US
+                                                            ).format(parsed)
+                                                        } else {
+                                                            compactDate
+                                                        }
+                                                    } catch (_: Exception) {
+                                                        compactDate
+                                                    }
+
+                                                Text(
+                                                    text = "Listed $displayDate",
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.outline,
+                                                    modifier = Modifier.padding(top = 2.dp)
+                                                )
+                                            }
+
+                                            if (dateListed == null) {
+                                                Text(
+                                                    text = "Listed date unavailable",
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.outline,
+                                                    modifier = Modifier.padding(top = 2.dp)
+                                                )
+                                            }
+
+                                        }
+                                        val currency = item.price?.currency ?: "$"
+                                        val priceVal = item.price?.value ?: 0.00
+                                        val formattedItemPrice = String.format(
+                                            java.util.Locale.getDefault(),
+                                            "%s %,.2f",
+                                            currency,
+                                            priceVal
+                                        )
+
                                         Text(
-                                            text = "Listed $displayDate",
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.outline,
-                                            modifier = Modifier.padding(top = 2.dp)
+                                            text = formattedItemPrice,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.widthIn(max = 104.dp),
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.End
                                         )
                                     }
-
-                                    val currency = item.price?.currency ?: "$"
-                                    val priceVal = item.price?.value ?: 0.00
-                                    val formattedItemPrice = String.format(
-                                        java.util.Locale.getDefault(),
-                                        "%s %,.2f",
-                                        currency,
-                                        priceVal
-                                    )
-
-                                    Text(
-                                        text = formattedItemPrice,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(top = 4.dp)
-                                    )
                                 }
                             }
 
@@ -295,13 +313,6 @@ fun OrderDetailScreen(
                                                 bottom = 12.dp
                                             )
                                     ) {
-                                        Text(
-                                            text = "Public listing comment",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(3.dp))
                                         Text(
                                             text = comment,
                                             fontSize = 12.sp,
@@ -1009,4 +1020,17 @@ private fun formatOrderMessageTimestamp(
     } else {
         cleaned
     }
+}
+
+
+internal fun compactOrderCondition(condition: String): String = when (condition.trim().lowercase(Locale.US)) {
+    "mint (m)", "mint", "m" -> "M"
+    "near mint (nm or m-)", "near mint (nm)", "near mint", "nm", "m-" -> "NM"
+    "very good plus (vg+)", "very good plus", "vg+" -> "VG+"
+    "very good (vg)", "very good", "vg" -> "VG"
+    "good plus (g+)", "good plus", "g+" -> "G+"
+    "good (g)", "good", "g" -> "G"
+    "fair (f)", "fair", "f" -> "F"
+    "poor (p)", "poor", "p" -> "P"
+    else -> condition.trim()
 }

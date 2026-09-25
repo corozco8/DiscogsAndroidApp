@@ -63,7 +63,6 @@ fun ReleaseDetails(
 
     if (showSellDialog) {
         AddListingDialog(
-            pricingMessage = pricing.message,
             // The loaded release metadata is authoritative even if the
             // optional price summary is still being fetched.
             priceSummary = (effectivePriceSummary ?: priceSummary
@@ -552,7 +551,6 @@ private fun ReleaseInfoSection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddListingDialog(
-    pricingMessage: String = "",
     priceSummary: ReleasePriceSummary? = null,
     onDismiss: () -> Unit,
     onSave: (Double, String, String, String) -> Unit
@@ -723,7 +721,6 @@ fun AddListingDialog(
                 }
 
                 // 3. Price Field
-                if (pricingMessage.isNotBlank()) Text(pricingMessage, style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = price,
                     onValueChange = {

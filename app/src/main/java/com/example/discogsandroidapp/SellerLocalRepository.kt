@@ -19,9 +19,29 @@ class SellerLocalRepository(context: Context) {
     val inventorySyncState = dao.observeSyncState(INVENTORY_SYNC_KEY)
     val orderSyncState = dao.observeSyncState(ORDERS_SYNC_KEY)
 
+    suspend fun cacheCreatedListing(listing: InventoryListing) = inventoryCommitMutex.withLock {
+        val now = System.currentTimeMillis()
+        val rawDate = listing.dateAdded?.takeIf { it.isNotBlank() } ?: listing.posted
+        val exactDate = parseDiscogsDate(rawDate)
+        dao.upsertInventory(listOf(LocalInventoryListingEntity(
+            listingId = listing.id, releaseId = listing.release.id,
+            artist = listing.release.artist, title = listing.release.title.ifBlank { listing.release.description },
+            thumbnail = listing.release.thumbnail, status = listing.status,
+            mediaCondition = listing.condition, sleeveCondition = listing.sleeve_condition,
+            comments = listing.comments, priceValue = listing.price?.value,
+            currency = listing.price?.currency ?: "USD", postedRaw = rawDate,
+            listedAtEpochMs = exactDate ?: now, listedDateIsExact = exactDate != null,
+            firstSeenAtEpochMs = now, lastSeenAtEpochMs = now
+        )))
+        inventoryGeneration++
+        inventoryChanges[listing.id] = inventoryGeneration
+        recentlyCreatedListings[listing.id] = now
+    }
+
     suspend fun removeLocalListing(id: Long) = inventoryCommitMutex.withLock {
         inventoryGeneration++
         inventoryChanges[id] = inventoryGeneration
+        recentlyCreatedListings.remove(id)
         dao.deleteInventoryListing(id)
     }
 
@@ -175,7 +195,12 @@ class SellerLocalRepository(context: Context) {
             // network page has succeeded. A failed/partial sync leaves the previous
             // valid local snapshot untouched.
             inventoryCommitMutex.withLock {
-            val changedIds = inventoryChanges.filterValues { it > generation }.keys
+            // Inventory pages can lag behind the confirmed individual listing.
+            // Keep recent creations until the feed includes them (bounded to ten minutes).
+            val observedIds = completeSnapshot.map { it.listingId }.toSet()
+            val commitTime = System.currentTimeMillis()
+            recentlyCreatedListings.entries.removeAll { it.key in observedIds || commitTime - it.value > 10 * 60_000 }
+            val changedIds = inventoryChanges.filterValues { it > generation }.keys + recentlyCreatedListings.keys
             val latest = if (changedIds.isEmpty()) emptyList() else dao.getInventorySnapshot().filter { it.listingId in changedIds }
             val mergedSnapshot = completeSnapshot.filterNot { it.listingId in changedIds } +
                 latest.map { it.copy(lastSeenAtEpochMs = syncStartedAt) }
@@ -416,6 +441,7 @@ class SellerLocalRepository(context: Context) {
         private val inventoryCommitMutex = Mutex()
         private var inventoryGeneration = 0L
         private val inventoryChanges = mutableMapOf<Long, Long>()
+        private val recentlyCreatedListings = mutableMapOf<Long, Long>()
         private val ordersSyncMutex = Mutex()
 
         const val INVENTORY_SYNC_KEY = "inventory"

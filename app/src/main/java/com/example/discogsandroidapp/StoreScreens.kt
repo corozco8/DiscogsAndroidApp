@@ -709,6 +709,25 @@ fun ListingDetailsDialog(
                         color = MaterialTheme.colorScheme.primary
                     )
 
+                    val listedDate = remember(listing.posted, listing.dateAdded) {
+                        val raw = listing.posted?.takeIf { it.isNotBlank() }
+                            ?: listing.dateAdded?.takeIf { it.isNotBlank() }
+                        raw?.take(10)?.let { compact ->
+                            runCatching {
+                                val input = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                                    .apply { isLenient = false }
+                                input.parse(compact)?.let { date ->
+                                    java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(date)
+                                } ?: compact
+                            }.getOrDefault(compact)
+                        }
+                    }
+                    Text(
+                        text = listedDate?.let { "Listed $it" } ?: "Listed date unavailable",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
                     if (listing.comments.isNotBlank()) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         Text(text = "Comments / Description:", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)

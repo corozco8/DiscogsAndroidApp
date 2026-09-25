@@ -194,7 +194,6 @@ fun MarketplaceListingsScreen(
 
     if (showSellDialog) {
         AddListingDialog(
-            pricingMessage = pricing.message,
             priceSummary = effectivePriceSummary ?: priceSummary,
             onDismiss = { showSellDialog = false },
             onSave = { price, condition, sleeveCondition, comments ->
@@ -210,11 +209,11 @@ fun MarketplaceListingsScreen(
                     sleeveCondition = sleeveCondition,
                     comments = comments,
                     token = token,
-                    onSuccess = {
+                    onResult = { resultMessage ->
                         android.widget.Toast.makeText(
                             context,
-                            "Successfully listed",
-                            android.widget.Toast.LENGTH_SHORT
+                            resultMessage,
+                            android.widget.Toast.LENGTH_LONG
                         ).show()
                     }
                 )

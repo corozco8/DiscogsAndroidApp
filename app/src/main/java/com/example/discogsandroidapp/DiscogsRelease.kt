@@ -139,7 +139,28 @@ data class ReleasePriceSummary(
     fun currentListingPriceFor(
         condition: String,
         sleeveCondition: String? = null
-    ): Double? = comparableListingPriceFor(condition, condition, sleeveCondition)
+    ): Double? {
+        val price = comparableListingPriceFor(condition, condition, sleeveCondition) ?: return null
+        return price.takeUnless { conflictsWithHigherGrade(condition, sleeveCondition, it) }
+    }
+
+    // A lower grade within 10% of any trusted higher-grade price is not a
+    // useful live recommendation. Compare under the same target sleeve policy.
+    private fun conflictsWithHigherGrade(
+        condition: String,
+        sleeveCondition: String?,
+        price: Double
+    ): Boolean {
+        val rank = conditionRank(condition) ?: return false
+        val grades = listOf(
+            "Poor (P)", "Fair (F)", "Good (G)", "Good Plus (G+)",
+            "Very Good (VG)", "Very Good Plus (VG+)", "Near Mint (NM or M-)", "Mint (M)"
+        )
+        return grades.drop(rank + 1).any { higherGrade ->
+            val higherPrice = comparableListingPriceFor(higherGrade, condition, sleeveCondition)
+            higherPrice != null && price >= roundPrice(higherPrice * 0.90)
+        }
+    }
 
     // Use the TARGET grade's sleeve policy even when sourcing another media grade.
     private fun comparableListingPriceFor(
@@ -205,10 +226,28 @@ data class ReleasePriceSummary(
         return lowestQualifyingPrice?.let(::roundPrice)
     }
 
-    /** Estimate only from observed NM/VG+/VG listings, never from another estimate. */
+    /** Estimate from observed listings only; includes the G+ price guard. */
     fun liveGradeEstimateFor(condition: String, sleeveCondition: String? = null): LiveGradeEstimate? {
+        // A conflicting G+ ask is replaced with 60% of the cheapest trusted
+        // better-grade ask. Keep it an estimate, not an observed G+ listing.
+        if (condition == "Good Plus (G+)") {
+            val matching = comparableListingPriceFor(condition, condition, sleeveCondition)
+            if (matching != null && conflictsWithHigherGrade(condition, sleeveCondition, matching)) {
+                val source = listOf("Very Good (VG)", "Very Good Plus (VG+)", "Near Mint (NM or M-)", "Mint (M)")
+                    .mapNotNull { grade ->
+                        comparableListingPriceFor(grade, condition, sleeveCondition)?.let { grade to it }
+                    }
+                    .minByOrNull { it.second } ?: return null
+                val estimate = roundPrice(source.second * 0.60)
+                return estimate.takeIf { it > 0.0 }?.let { LiveGradeEstimate(it, source.first, source.second) }
+            }
+        }
+        // Rejected matching live prices must go straight to the original fallback.
+        val matchingPrice = comparableListingPriceFor(condition, condition, sleeveCondition)
+        if (matchingPrice != null && conflictsWithHigherGrade(condition, sleeveCondition, matchingPrice)) return null
         val grades = listOf("Near Mint (NM or M-)", "Very Good Plus (VG+)", "Very Good (VG)")
-        val ratios = listOf(1.0, 0.5, 0.25)
+        // Keep 60% per grade step (40% reduction), using unrounded anchors.
+        val ratios = listOf(1.0, 0.60, 0.36)
         val target = grades.indexOf(condition)
         if (target < 0 || currentListingPriceFor(condition, sleeveCondition) != null) return null
         // Closest grade first; prefer the better grade when equally close.
@@ -216,6 +255,7 @@ data class ReleasePriceSummary(
             val sourcePrice = comparableListingPriceFor(grades[source], condition, sleeveCondition) ?: continue
             val estimate = roundPrice(sourcePrice * ratios[target] / ratios[source])
             if (!estimate.isFinite() || estimate <= 0.0) continue
+            if (conflictsWithHigherGrade(condition, sleeveCondition, estimate)) return null
             return LiveGradeEstimate(estimate, grades[source], sourcePrice)
         }
         return null
