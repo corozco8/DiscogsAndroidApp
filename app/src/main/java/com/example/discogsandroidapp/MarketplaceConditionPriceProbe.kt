@@ -95,8 +95,7 @@ fun marketplaceReleaseListingsUrl(
             conditionQuery +
             "&sort=price%2Casc" +
             "&limit=$safeLimit" +
-            "&page=$safePage" +
-            "&currency=USD"
+            "&page=$safePage"
 }
 
 data class MarketplacePriceSample(
@@ -112,8 +111,21 @@ fun evaluateMarketplaceConditionPriceSample(
     excludedListingIds: Set<Long> = emptySet(),
     onResult: (MarketplacePriceSample) -> Unit
 ) {
+    MarketplaceExchangeRates.prepare(webView.context) { rates ->
+        if (acceptResult()) evaluateMarketplaceSampleWithRates(webView, acceptResult, excludedListingIds, rates, onResult)
+    }
+}
+
+private fun evaluateMarketplaceSampleWithRates(
+    webView: WebView,
+    acceptResult: () -> Boolean,
+    excludedListingIds: Set<Long>,
+    usdRates: Map<String, Double>,
+    onResult: (MarketplacePriceSample) -> Unit
+) {
     val script = """
         (function() {
+            const USD_RATES = ${JSONObject(usdRates).toString()};
             const MEDIA_GRADES = [
                 'Near Mint (NM or M-)',
                 'Very Good Plus (VG+)',
@@ -143,44 +155,52 @@ fun evaluateMarketplaceConditionPriceSample(
                 return el ? (el.textContent || '').trim() : '';
             }
 
-            function parseUsdPrice(raw) {
+            function parseUsdPrice(raw, currencyHint) {
                 if (!raw) return null;
-
-                const normalized = String(raw)
-                    .replace(/\u00a0/g, ' ')
-                    .trim();
-
-                if (!normalized) return null;
-
-                // We intentionally price-match only USD listings. Never let a
-                // foreign symbol/prefix fall through to the dollar parser.
-                if (/(?:€|£|¥|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|SG\$)/i.test(normalized)) {
-                    return null;
-                }
-
-                // Validate the ENTIRE amount. This prevents partial matches such
-                // as US$1234.56 -> 123, USD 1000.00 -> 100, or US$12,50 -> 12.
-                const amount = '(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\\.[0-9]{1,2})?';
-                const patterns = [
-                    new RegExp('^US\\$\\s*(' + amount + ')$', 'i'),
-                    new RegExp('^USD\\s+(' + amount + ')$', 'i'),
-                    new RegExp('^\\$\\s*(' + amount + ')$', 'i'),
-                    new RegExp('^(' + amount + ')\\s+USD$', 'i')
+                let valueText = String(raw).replace(/[\u00a0\u202f]/g, ' ').trim();
+                let currency = null;
+                const aliases = [
+                    ['US$', 'USD'], ['CA$', 'CAD'], ['C$', 'CAD'],
+                    ['AU$', 'AUD'], ['A$', 'AUD'], ['NZ$', 'NZD'],
+                    ['HK$', 'HKD'], ['SG$', 'SGD'], ['S$', 'SGD'],
+                    ['MX$', 'MXN'], ['R$', 'BRL'], ['JP¥', 'JPY'],
+                    ['€', 'EUR'], ['£', 'GBP']
                 ];
-
-                let numericText = null;
-                for (let i = 0; i < patterns.length; i++) {
-                    const match = normalized.match(patterns[i]);
-                    if (match) {
-                        numericText = match[1];
-                        break;
+                const code = valueText.match(/^([A-Z]{3})\s*/i) || valueText.match(/\s*([A-Z]{3})$/i);
+                if (code) {
+                    currency = code[1].toUpperCase();
+                    valueText = valueText.replace(code[0], '').trim();
+                } else {
+                    for (const pair of aliases) {
+                        if (valueText.startsWith(pair[0])) {
+                            currency = pair[1]; valueText = valueText.slice(pair[0].length).trim(); break;
+                        }
+                        if (valueText.endsWith(pair[0])) {
+                            currency = pair[1]; valueText = valueText.slice(0, -pair[0].length).trim(); break;
+                        }
                     }
                 }
+                const hint = String(currencyHint || '').toUpperCase();
+                if (currency && hint && currency !== hint) return null;
+                if (!currency && /^[A-Z]{3}$/.test(hint)) {
+                    currency = hint;
+                    // Bare symbols require explicit row currency metadata.
+                    if (valueText.startsWith('$') && /^(USD|CAD|AUD|NZD|HKD|SGD|MXN)$/.test(currency)) valueText = valueText.slice(1).trim();
+                    if (valueText.startsWith('¥') && /^(JPY|CNY)$/.test(currency)) valueText = valueText.slice(1).trim();
+                }
+                if (!currency || !Number.isFinite(USD_RATES[currency]) || USD_RATES[currency] <= 0) return null;
 
-                if (!numericText) return null;
-
-                const value = parseFloat(numericText.replace(/,/g, ''));
-                return Number.isFinite(value) && value > 0 ? value : null;
+                // Validate the entire amount; accept grouped and localized decimals.
+                if (/^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?$/.test(valueText)) {
+                    valueText = valueText.replace(/,/g, '');
+                } else if (/^(?:\d{1,3}(?:\.\d{3})+|\d+),\d{1,2}$/.test(valueText)) {
+                    valueText = valueText.replace(/\./g, '').replace(',', '.');
+                } else if (/^\d{1,3}(?: \d{3})+(?:[.,]\d{1,2})?$/.test(valueText)) {
+                    valueText = valueText.replace(/ /g, '').replace(',', '.');
+                } else return null;
+                const amount = Number(valueText);
+                const usd = amount * USD_RATES[currency];
+                return Number.isFinite(usd) && usd > 0 ? usd : null;
             }
 
             function canonicalGrade(raw, grades) {
@@ -249,13 +269,17 @@ fun evaluateMarketplaceConditionPriceSample(
                     '[data-testid*="price"]'
                 );
 
+                const currencyElement = row.querySelector('[itemprop="priceCurrency"], [data-currency]');
+                const currencyHint = (explicit && explicit.getAttribute('data-currency')) ||
+                    row.getAttribute('data-currency') ||
+                    (currencyElement && (currencyElement.getAttribute('content') || currencyElement.getAttribute('data-currency'))) || '';
                 const explicitText = text(explicit);
                 if (explicitText && !/(?:shipping|postage|tax|subtotal|total)/i.test(explicitText)) {
-                    const explicitPrice = parseUsdPrice(explicitText);
+                    const explicitPrice = parseUsdPrice(explicitText, currencyHint);
                     if (explicitPrice !== null) return explicitPrice;
                 }
 
-                // Fallback only to complete row lines that are themselves a USD
+                // Fallback only to complete row lines that are themselves a currency
                 // amount. Never scrape a numeric substring from shipping/total text.
                 const all = row.innerText || row.textContent || '';
                 const lines = all.split(/\n+/)
@@ -265,7 +289,7 @@ fun evaluateMarketplaceConditionPriceSample(
                 for (let i = 0; i < lines.length; i++) {
                     const line = lines[i];
                     if (/(?:shipping|postage|tax|subtotal|total)/i.test(line)) continue;
-                    const price = parseUsdPrice(line);
+                    const price = parseUsdPrice(line, currencyHint);
                     if (price !== null) return price;
                 }
 

@@ -22,7 +22,13 @@ data class CreateListingRequest(
     @SerialName("sleeve_condition") val sleeve_condition: String,
     val price: Double,
     val comments: String,
-    val status: String = "For Sale"
+    val status: String
+)
+
+@Serializable
+data class CreateListingResponse(
+    @SerialName("listing_id") val listingId: Long? = null,
+    val id: Long? = null
 )
 
 // If EditListingRequest already exists elsewhere, remove this.
@@ -106,7 +112,7 @@ interface DiscogsApiService {
     suspend fun createListing(
         @Header("Authorization") authHeader: String,
         @Body request: CreateListingRequest
-    ): Response<Unit>
+    ): Response<CreateListingResponse>
 
     @GET("marketplace/orders")
     suspend fun getOrders(

@@ -40,6 +40,8 @@ fun MarketplaceListingsScreen(
     onBarcodeSearchRequested: (String) -> Unit
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
+    var isSubmittingListing by remember { mutableStateOf(false) }
+    var listingSubmissionError by remember { mutableStateOf<String?>(null) }
     var marketplaceSearchQuery by remember(releaseId) { mutableStateOf("") }
     val pricing = rememberMarketplacePricing(releaseId)
     val effectivePriceSummary = pricing.prices?.let {
@@ -194,10 +196,19 @@ fun MarketplaceListingsScreen(
 
     if (showSellDialog) {
         AddListingDialog(
-            pricingMessage = pricing.message,
             priceSummary = effectivePriceSummary ?: priceSummary,
-            onDismiss = { showSellDialog = false },
-            onSave = { price, condition, sleeveCondition, comments ->
+            isSubmitting = isSubmittingListing,
+            submissionError = listingSubmissionError,
+            onDismiss = {
+                if (!isSubmittingListing) {
+                    showSellDialog = false
+                    listingSubmissionError = null
+                }
+            },
+            onSave = saveListing@{ price, condition, sleeveCondition, comments ->
+                if (isSubmittingListing) return@saveListing
+                isSubmittingListing = true
+                listingSubmissionError = null
                 Log.d(
                     "MARKETPLACE_LISTING",
                     "Creating listing for releaseId=$releaseId"
@@ -210,16 +221,23 @@ fun MarketplaceListingsScreen(
                     sleeveCondition = sleeveCondition,
                     comments = comments,
                     token = token,
-                    onSuccess = {
-                        android.widget.Toast.makeText(
-                            context,
-                            "Successfully listed",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
+                    onResult = { resultMessage, verified ->
+                        isSubmittingListing = false
+                        if (verified) {
+                            showSellDialog = false
+                            listingSubmissionError = null
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                            android.widget.Toast.makeText(
+                                context,
+                                resultMessage,
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            listingSubmissionError = resultMessage
+                        }
                     }
                 )
-
-                showSellDialog = false
             }
         )
     }

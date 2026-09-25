@@ -16,6 +16,8 @@ object RetrofitClient {
 
     private fun create(background: Boolean): DiscogsApiService {
         val client = okhttp3.OkHttpClient.Builder()
+            // A lost POST response must not cause an automatic duplicate listing.
+            .retryOnConnectionFailure(false)
             .addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder().tag(
                     DiscogsRequestPriority::class.java,

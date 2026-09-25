@@ -22,8 +22,13 @@ internal object SearchDialogBridge {
 }
 
 @Composable
-internal fun SearchAccessibleDialog(onDismissRequest: () -> Unit, content: @Composable () -> Unit) {
+internal fun SearchAccessibleDialog(
+    onDismissRequest: () -> Unit,
+    allowSearchFocus: Boolean = true,
+    content: @Composable () -> Unit
+) {
     val dismiss by rememberUpdatedState(onDismissRequest)
+    val searchFocusAllowed by rememberUpdatedState(allowSearchFocus)
     val screenHeight = LocalConfiguration.current.screenHeightDp
     val density = LocalDensity.current.density
     val headerBottom = SearchDialogBridge.searchBounds?.bottom?.div(density) ?: 160f
@@ -37,7 +42,7 @@ internal fun SearchAccessibleDialog(onDismissRequest: () -> Unit, content: @Comp
             val callback = original?.let { delegate ->
                 object : Window.Callback by delegate {
                     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+                        if (searchFocusAllowed && event.actionMasked == MotionEvent.ACTION_DOWN &&
                             SearchDialogBridge.searchBounds?.contains(Offset(event.rawX, event.rawY)) == true) {
                             val focus = SearchDialogBridge.focusSearch
                             dismiss()

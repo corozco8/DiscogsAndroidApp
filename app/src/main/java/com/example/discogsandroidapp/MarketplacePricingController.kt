@@ -95,11 +95,12 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         val uri = Uri.parse(url)
         // Do not replace a full first-page snapshot with a user-filtered subset or a different currency.
         return (uri.getQueryParameter("page") ?: "1") == "1" &&
-            uri.getQueryParameter("currency") == "USD" &&
+            uri.getQueryParameter("currency").isNullOrBlank() &&
             uri.queryParameterNames.all { it in setOf("release_id", "sort", "limit", "page", "currency") }
     }
     fun createWebView(context: Context, hidden: Boolean): WebView = WebView(context).apply {
         destroyView()
+        MarketplaceExchangeRates.prepare(context)
         webView = this
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true

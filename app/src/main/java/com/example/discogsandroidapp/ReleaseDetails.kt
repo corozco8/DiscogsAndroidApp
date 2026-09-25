@@ -12,6 +12,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,13 +48,20 @@ fun ReleaseDetails(
     release: DiscogsRelease,
     priceSummary: ReleasePriceSummary? = null,
     onBackClick: () -> Unit,
-    onSellConfirm: (price: Double, condition: String, sleeve: String, comments: String) -> Unit,
+    onSellConfirm: (
+        price: Double, condition: String, sleeve: String, comments: String,
+        onResult: (message: String, verified: Boolean) -> Unit
+    ) -> Unit,
     onViewListingsClick: (releaseId: Long) -> Unit = {},
     onViewVersionsClick: (masterId: Long) -> Unit = {},
     onRefresh: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
+    var isSubmittingListing by remember { mutableStateOf(false) }
+    var listingSubmissionError by remember { mutableStateOf<String?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val releaseId = release.id
     val pricing = rememberMarketplacePricing(releaseId)
     val effectivePriceSummary = pricing.prices?.let {
@@ -63,18 +72,42 @@ fun ReleaseDetails(
 
     if (showSellDialog) {
         AddListingDialog(
-            pricingMessage = pricing.message,
             // The loaded release metadata is authoritative even if the
             // optional price summary is still being fetched.
             priceSummary = (effectivePriceSummary ?: priceSummary
             ?: ReleasePriceSummary()).copy(
                 isAlbumRelease = release.isAlbumFormat()
             ),
-            onDismiss = { showSellDialog = false },
+            isSubmitting = isSubmittingListing,
+            submissionError = listingSubmissionError,
+            onDismiss = {
+                if (!isSubmittingListing) {
+                    showSellDialog = false
+                    listingSubmissionError = null
+                }
+            },
             onSave = { price, condition, sleeve, comments ->
-                showSellDialog = false
-                Log.d(TAG, "Sell confirmation: price=$price, condition='$condition', sleeve='$sleeve', comments='$comments'")
-                onSellConfirm(price, condition, sleeve, comments)
+                if (!isSubmittingListing) {
+                    isSubmittingListing = true
+                    listingSubmissionError = null
+                    Log.d(TAG, "Sell confirmation: price=$price, condition='$condition', sleeve='$sleeve', comments='$comments'")
+                    onSellConfirm(price, condition, sleeve, comments) { message, verified ->
+                        isSubmittingListing = false
+                        if (verified) {
+                            showSellDialog = false
+                            listingSubmissionError = null
+                            // The activity's search field is behind this dialog.
+                            // Don't let it reclaim focus and reopen the IME.
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                        } else {
+                            // Preserve condition, price, and comments for correction.
+                            // An unconfirmed POST may have created a listing, so show
+                            // the exact verification warning rather than auto-retry.
+                            listingSubmissionError = message
+                        }
+                    }
+                }
             }
         )
     }
@@ -552,8 +585,9 @@ private fun ReleaseInfoSection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddListingDialog(
-    pricingMessage: String = "",
     priceSummary: ReleasePriceSummary? = null,
+    isSubmitting: Boolean = false,
+    submissionError: String? = null,
     onDismiss: () -> Unit,
     onSave: (Double, String, String, String) -> Unit
 ) {
@@ -580,7 +614,12 @@ fun AddListingDialog(
         "Generic"
     )
 
-    SearchAccessibleDialog(onDismissRequest = onDismiss) {
+    SearchAccessibleDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        allowSearchFocus = !isSubmitting
+    ) {
+        val dialogFocusManager = LocalFocusManager.current
+        val dialogKeyboardController = LocalSoftwareKeyboardController.current
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -599,7 +638,7 @@ fun AddListingDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = onDismiss, enabled = !isSubmitting) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Cancel",
@@ -635,12 +674,30 @@ fun AddListingDialog(
                         }
 
                         if (!hasError) {
+                            // Close the price/comments IME before reporting the result.
+                            // Never transfer text focus to the activity search field.
+                            dialogFocusManager.clearFocus(force = true)
+                            dialogKeyboardController?.hide()
                             val finalSleeve = if (sleeveCondition.isBlank()) "Not Graded" else sleeveCondition
                             onSave(parsedPrice, condition, finalSleeve, comments)
                         }
-                    }) {
-                        Text("Save", fontWeight = FontWeight.Bold)
+                    }, enabled = !isSubmitting) {
+                        if (isSubmitting) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Listing…", fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("Save", fontWeight = FontWeight.Bold)
+                        }
                     }
+                }
+
+                if (submissionError != null) {
+                    Text(
+                        text = submissionError,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp
+                    )
                 }
 
                 // 1. Media Condition Scrollable Row
@@ -663,7 +720,7 @@ fun AddListingDialog(
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                 contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
-                                    .clickable {
+                                    .clickable(enabled = !isSubmitting) {
                                         condition = fullGrade
                                         conditionError = false
                                     }
@@ -710,7 +767,7 @@ fun AddListingDialog(
                                 shape = RoundedCornerShape(16.dp),
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                 contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.clickable { sleeveCondition = fullGrade }
+                                modifier = Modifier.clickable(enabled = !isSubmitting) { sleeveCondition = fullGrade }
                             ) {
                                 Text(
                                     text = getShortGrade(fullGrade),
@@ -723,7 +780,6 @@ fun AddListingDialog(
                 }
 
                 // 3. Price Field
-                if (pricingMessage.isNotBlank()) Text(pricingMessage, style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = price,
                     onValueChange = {
@@ -736,6 +792,7 @@ fun AddListingDialog(
                         keyboardType = KeyboardType.Decimal
                     ),
                     isError = priceError,
+                    enabled = !isSubmitting,
                     modifier = Modifier.keyboardInputArea().fillMaxWidth(),
                     supportingText =
                         if (priceError) {
@@ -821,6 +878,7 @@ fun AddListingDialog(
                                 )
 
                                 TextButton(
+                                    enabled = !isSubmitting,
                                     onClick = {
                                         price = String.format(
                                             java.util.Locale.US,
@@ -865,6 +923,7 @@ fun AddListingDialog(
                     onValueChange = { comments = it },
                     label = { Text("Description / Comments") },
                     maxLines = 3,
+                    enabled = !isSubmitting,
                     modifier = Modifier.keyboardInputArea().fillMaxWidth()
                 )
             }
