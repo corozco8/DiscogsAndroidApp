@@ -8,6 +8,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -20,6 +23,16 @@ internal object SearchDialogBridge {
     var searchBounds: Rect? = null
     var focusSearch: (() -> Unit)? = null
 }
+
+/** The search field can overlap the dialog when the IME resizes its window. */
+internal fun shouldFocusSearchBehindDialog(
+    point: Offset,
+    searchBounds: Rect?,
+    dialogBounds: Rect?,
+    allowSearchFocus: Boolean
+): Boolean = allowSearchFocus &&
+    searchBounds != null && dialogBounds != null && !dialogBounds.isEmpty &&
+    searchBounds.contains(point) && !dialogBounds.contains(point)
 
 @Composable
 internal fun SearchAccessibleDialog(
@@ -36,18 +49,36 @@ internal fun SearchAccessibleDialog(
     Dialog(onDismissRequest = onDismissRequest,
         properties = DialogProperties(dismissOnClickOutside = true, dismissOnBackPress = true)) {
         val view = LocalView.current
+        var contentCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
         DisposableEffect(view) {
             val window = (view.parent as? DialogWindowProvider)?.window
             val original = window?.callback
             val callback = original?.let { delegate ->
                 object : Window.Callback by delegate {
                     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                        if (searchFocusAllowed && event.actionMasked == MotionEvent.ACTION_DOWN &&
-                            SearchDialogBridge.searchBounds?.contains(Offset(event.rawX, event.rawY)) == true) {
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                            // Resolve the window's current screen position at touch time:
+                            // showing/hiding the IME can move it without a Compose relayout.
+                            val dialogBounds = contentCoordinates?.takeIf { it.isAttached }?.let { coordinates ->
+                                val screen = IntArray(2)
+                                val inWindow = IntArray(2)
+                                view.getLocationOnScreen(screen)
+                                view.getLocationInWindow(inWindow)
+                                coordinates.boundsInWindow().translate(
+                                    Offset((screen[0] - inWindow[0]).toFloat(), (screen[1] - inWindow[1]).toFloat())
+                                )
+                            }
                             val focus = SearchDialogBridge.focusSearch
-                            dismiss()
-                            focus?.invoke()
-                            return true
+                            if (focus != null && shouldFocusSearchBehindDialog(
+                                    point = Offset(event.rawX, event.rawY),
+                                    searchBounds = SearchDialogBridge.searchBounds,
+                                    dialogBounds = dialogBounds,
+                                    allowSearchFocus = searchFocusAllowed
+                                )) {
+                                dismiss()
+                                focus()
+                                return true
+                            }
                         }
                         return delegate.dispatchTouchEvent(event)
                     }
@@ -56,6 +87,8 @@ internal fun SearchAccessibleDialog(
             if (callback != null) window?.callback = callback
             onDispose { if (window?.callback === callback) window?.callback = original }
         }
-        Box(Modifier.heightIn(max = maxHeight)) { content() }
+        Box(Modifier.heightIn(max = maxHeight).onGloballyPositioned { contentCoordinates = it }) {
+            content()
+        }
     }
 }
