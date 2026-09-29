@@ -1,12 +1,6 @@
 package com.example.discogsandroidapp
 
-import android.graphics.Bitmap
 import android.util.Log
-import android.webkit.WebView
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -25,8 +19,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import java.util.concurrent.atomic.AtomicBoolean
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 @Composable
@@ -183,22 +175,29 @@ fun MarketplaceListingsScreen(
             }
         }
 
-        MarketplacePricingStatus(pricing)
-        if (pricing.ready) {
+        if (pricing.ready && !pricing.verificationVisible && pricing.canShowPage) {
             key(releaseId, pricing.attempt) {
-                AndroidView(
-                    modifier = Modifier.weight(1f),
-                    factory = { androidContext -> pricing.createWebView(androidContext, hidden = false) }
+                MarketplacePricingWebView(
+                    pricing, hidden = false,
+                    modifier = Modifier.weight(1f).fillMaxWidth()
                 )
             }
+        } else if (pricing.ready && !pricing.verificationVisible) {
+            MarketplacePricingUnavailable(pricing, Modifier.weight(1f).fillMaxWidth())
         }
     }
 
+    LaunchedEffect(showSellDialog, isSubmittingListing, pricing.status) {
+        if (showSellDialog && !isSubmittingListing) pricing.openVerification(automatic = true)
+    }
     if (showSellDialog) {
         AddListingDialog(
             priceSummary = effectivePriceSummary ?: priceSummary,
             isSubmitting = isSubmittingListing,
             submissionError = listingSubmissionError,
+            pricingInfo = pricing.listingInfo,
+            onVerifyPricing = { pricing.openVerification() },
+            onRefreshPricing = pricing::refresh,
             onDismiss = {
                 if (!isSubmittingListing) {
                     showSellDialog = false
@@ -241,4 +240,5 @@ fun MarketplaceListingsScreen(
             }
         )
     }
+    MarketplaceVerificationDialog(pricing)
 }

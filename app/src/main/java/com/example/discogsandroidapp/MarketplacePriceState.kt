@@ -6,7 +6,11 @@ data class ActiveMarketplaceConditionPrices(
     val mediaLowest: Map<String, Double> = emptyMap(),
     val mediaSleeveLowest: Map<String, Double> = emptyMap(),
     val mediaListingCounts: Map<String, Int> = emptyMap(),
-    val mediaSleeveListingCounts: Map<String, Int> = emptyMap()
+    val mediaSleeveListingCounts: Map<String, Int> = emptyMap(),
+    // Every readable item price on page one, including grades excluded from
+    // seller recommendations. Keep individual values so averages weight copies,
+    // not condition groups. Older cached snapshots have no range data.
+    val firstPagePrices: List<Double> = emptyList()
 ) {
     // Legacy convenience accessors retained for the existing ReleasePriceSummary adapter.
     val nearMint: Double?
@@ -38,7 +42,8 @@ data class ActiveMarketplaceConditionPrices(
         return ActiveMarketplaceConditionPrices(
             minima(mediaLowest, page.mediaLowest), minima(mediaSleeveLowest, page.mediaSleeveLowest),
             counts(mediaListingCounts, page.mediaListingCounts),
-            counts(mediaSleeveListingCounts, page.mediaSleeveListingCounts)
+            counts(mediaSleeveListingCounts, page.mediaSleeveListingCounts),
+            firstPagePrices
         )
     }
 }

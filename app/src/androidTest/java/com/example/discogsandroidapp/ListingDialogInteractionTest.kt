@@ -24,6 +24,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
@@ -142,5 +143,57 @@ class ListingDialogInteractionTest {
             assertEquals(1, saves)
             assertEquals(0, dismissals)
         }
+    }
+
+    @Test fun verificationAndPriceUpdatesPreserveTheListingDraft() {
+        val pricing = mutableStateOf(ListingPricingInfo(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, "Security check required"))
+        val summary = mutableStateOf(ReleasePriceSummary())
+        var verifications = 0
+        var saves = 0
+        var dismissals = 0
+        compose.setContent {
+            MaterialTheme {
+                AddListingDialog(
+                    priceSummary = summary.value, pricingInfo = pricing.value,
+                    onVerifyPricing = { verifications++ }, onDismiss = { dismissals++ },
+                    onSave = { price, condition, _, _ ->
+                        assertEquals(12.50, price, 0.0)
+                        assertEquals("Very Good (VG)", condition)
+                        saves++
+                    }
+                )
+            }
+        }
+        compose.onAllNodesWithText("VG")[0].performClick()
+        compose.onNode(hasSetTextAction() and hasText("Price (USD)")).performTextInput("12.50")
+        compose.onNodeWithText("Verify Discogs").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(1, verifications)
+            assertEquals(0, saves)
+            assertEquals(0, dismissals)
+            pricing.value = ListingPricingInfo(MarketplaceUiPriceStatus.FRESH, "Prices checked now")
+            summary.value = ReleasePriceSummary(isAlbumRelease = false,
+                activeMediaLowestPrices = mapOf("Very Good (VG)" to 50.0),
+                activeMediaListingCounts = mapOf("Very Good (VG)" to 2))
+        }
+        compose.onNodeWithText("Verify Discogs").assertDoesNotExist()
+        compose.onNodeWithText("12.50").assertExists()
+        compose.onNodeWithText("Save").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(1, saves) }
+    }
+
+    @Test fun guideUpdatesFromAlgorithmToFirstPageAverage() {
+        val prices = mutableStateOf(emptyList<Double>())
+        compose.setContent {
+            MaterialTheme {
+                SalesRangeCard(ReleasePriceSummary(low = 2.0, median = 15.0, high = 60.0), livePrices = prices.value)
+            }
+        }
+        compose.onNodeWithText("Median").assertIsDisplayed()
+        compose.runOnIdle { prices.value = listOf(10.0, 20.0, 90.0) }
+        compose.onNodeWithText("Average").assertIsDisplayed()
+        compose.onNodeWithText("Median").assertDoesNotExist()
+        compose.onNodeWithText("Low").assertIsDisplayed()
+        compose.onNodeWithText("High").assertIsDisplayed()
     }
 }

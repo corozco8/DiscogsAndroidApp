@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -27,19 +28,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.launch
-import android.graphics.Bitmap
 import android.util.Log
-import android.webkit.WebView
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebViewClient
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
-import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "ReleaseDetails"
 
@@ -70,6 +62,10 @@ fun ReleaseDetails(
     var isRefreshing by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
+    LaunchedEffect(showSellDialog, isSubmittingListing, pricing.status) {
+        if (showSellDialog && !isSubmittingListing) pricing.openVerification(automatic = true)
+    }
+
     if (showSellDialog) {
         AddListingDialog(
             // The loaded release metadata is authoritative even if the
@@ -80,6 +76,9 @@ fun ReleaseDetails(
             ),
             isSubmitting = isSubmittingListing,
             submissionError = listingSubmissionError,
+            pricingInfo = pricing.listingInfo,
+            onVerifyPricing = { pricing.openVerification() },
+            onRefreshPricing = pricing::refresh,
             onDismiss = {
                 if (!isSubmittingListing) {
                     showSellDialog = false
@@ -113,12 +112,14 @@ fun ReleaseDetails(
     }
 
 
+    MarketplaceVerificationDialog(pricing)
     Box(modifier = modifier.fillMaxSize()) {
-        if (releaseId != null && pricing.ready && pricing.needsLoad) {
+        if (releaseId != null && pricing.ready && pricing.needsLoad &&
+            !pricing.verificationVisible && pricing.canShowPage) {
             key(releaseId, pricing.attempt) {
-                AndroidView(
-                    modifier = Modifier.matchParentSize().alpha(0.01f),
-                    factory = { context -> pricing.createWebView(context, hidden = true) }
+                MarketplacePricingWebView(
+                    pricing, hidden = true,
+                    modifier = Modifier.matchParentSize().alpha(0.01f)
                 )
             }
         }
@@ -252,9 +253,11 @@ fun ReleaseDetails(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // REAL-TIME SALES RANGE CARD (Market summary remains intact)
+                // Keep the algorithm guide visible while the first live page loads.
                 SalesRangeCard(
                     summary = priceSummary ?: ReleasePriceSummary(),
+                    livePrices = pricing.prices?.firstPagePrices.orEmpty(),
+                    pricingInfo = pricing.listingInfo,
                     haveCount = release.community?.have ?: 0,
                     wantCount = release.community?.want ?: 0,
                     onListingsClick = { release.id?.let { onViewListingsClick(it) } }
@@ -588,6 +591,9 @@ fun AddListingDialog(
     priceSummary: ReleasePriceSummary? = null,
     isSubmitting: Boolean = false,
     submissionError: String? = null,
+    pricingInfo: ListingPricingInfo? = null,
+    onVerifyPricing: (() -> Unit)? = null,
+    onRefreshPricing: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onSave: (Double, String, String, String) -> Unit
 ) {
@@ -804,6 +810,17 @@ fun AddListingDialog(
                         }
                 )
 
+                ListingPricingNotice(
+                    info = pricingInfo,
+                    enabled = !isSubmitting,
+                    onVerify = onVerifyPricing?.let { verify -> {
+                        dialogFocusManager.clearFocus(force = true)
+                        dialogKeyboardController?.hide()
+                        verify()
+                    } },
+                    onRefresh = onRefreshPricing
+                )
+
                 // Compact seller recommendation. Distinguish a verified
                 // live marketplace price from the app's fallback estimate.
                 if (
@@ -838,6 +855,8 @@ fun AddListingDialog(
                     val isLive = livePrice != null
 
                     if (recommendation != null) {
+                        val source = listingPriceSource(isLive, gradeEstimate != null, pricingInfo?.usingSavedPrices == true)
+                        val amount = String.format(java.util.Locale.US, "%.2f", recommendation)
                         Column(
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -852,26 +871,11 @@ fun AddListingDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text =
-                                        if (isLive) {
-                                            "Based on listings ${getShortGrade(condition)}: \$${
-                                                String.format(
-                                                    java.util.Locale.getDefault(),
-                                                    "%.2f",
-                                                    recommendation
-                                                )
-                                            }"
-                                        } else if (gradeEstimate != null) {
-                                            "Estimated ${getShortGrade(condition)}: USD ${String.format(java.util.Locale.US, "%.2f", recommendation)}"
-                                        } else {
-                                            "Suggested ${getShortGrade(condition)}: \$${
-                                                String.format(
-                                                    java.util.Locale.getDefault(),
-                                                    "%.2f",
-                                                    recommendation
-                                                )
-                                            }"
-                                        },
+                                    text = if (isLive) "$source: \$$amount"
+                                        else "$source ${getShortGrade(condition)}: USD $amount",
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary
@@ -898,18 +902,11 @@ fun AddListingDialog(
                                     )
                                 }
                             }
-                            if (gradeEstimate != null) {
-                                Text(
-                                    text = "From ${getShortGrade(gradeEstimate.sourceCondition)} listings at USD ${String.format(java.util.Locale.US, "%.2f", gradeEstimate.sourcePrice)} · grading-ratio estimate, not a matching listing",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
                         }
                     } else {
                         Text(
-                            text = "Checking current USD listings…",
+                            text = if (pricingInfo == null || pricingInfo.status == MarketplaceUiPriceStatus.LOADING)
+                                "Checking current USD listings…" else "No price recommendation available. Enter your own price.",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 4.dp)
@@ -934,11 +931,14 @@ fun AddListingDialog(
 @Composable
 fun SalesRangeCard(
     summary: ReleasePriceSummary,
+    livePrices: List<Double> = emptyList(),
+    pricingInfo: ListingPricingInfo? = null,
     haveCount: Int = 0,
     wantCount: Int = 0,
     onListingsClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val guide = priceGuideValues(summary, livePrices, pricingInfo)
     fun formatPrice(price: Double?): String {
         return if (price != null && price > 0.0) "$${String.format(java.util.Locale.getDefault(), "%.2f", price)}" else "N/A"
     }
@@ -1013,19 +1013,19 @@ fun SalesRangeCard(
                         modifier = Modifier.weight(1f),
                         horizontalAlignment = Alignment.Start
                     ) {
-                        Text("Low", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(guide.lowLabel, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         Text(
-                            text = formatPrice(summary.low),
+                            text = formatPrice(guide.low),
                             color = MaterialTheme.colorScheme.onSurface,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
                         )
-                        Text(if (summary.low != null && summary.low > 0) summary.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                        Text(if (guide.low != null && guide.low > 0) guide.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
                     }
 
                     HorizontalDivider(
-                        modifier = Modifier.weight(0.5f).padding(horizontal = 2.dp),
+                        modifier = Modifier.weight(0.2f).padding(horizontal = 2.dp),
                         thickness = 1.5.dp,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                     )
@@ -1034,19 +1034,19 @@ fun SalesRangeCard(
                         modifier = Modifier.weight(1.2f),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("Median", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(guide.middleLabel, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         Text(
-                            text = formatPrice(summary.median),
+                            text = formatPrice(guide.middle),
                             color = MaterialTheme.colorScheme.primary,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.ExtraBold,
                             maxLines = 1
                         )
-                        Text(if (summary.median != null && summary.median > 0) summary.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                        Text(if (guide.middle != null && guide.middle > 0) guide.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
                     }
 
                     HorizontalDivider(
-                        modifier = Modifier.weight(0.5f).padding(horizontal = 2.dp),
+                        modifier = Modifier.weight(0.2f).padding(horizontal = 2.dp),
                         thickness = 1.5.dp,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                     )
@@ -1055,15 +1055,15 @@ fun SalesRangeCard(
                         modifier = Modifier.weight(1f),
                         horizontalAlignment = Alignment.End
                     ) {
-                        Text("High", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        Text(guide.highLabel, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         Text(
-                            text = formatPrice(summary.high),
+                            text = formatPrice(guide.high),
                             color = MaterialTheme.colorScheme.onSurface,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
                         )
-                        Text(if (summary.high != null && summary.high > 0) summary.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                        Text(if (guide.high != null && guide.high > 0) guide.currency else "", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
                     }
                 }
             }

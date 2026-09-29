@@ -102,7 +102,8 @@ data class MarketplacePriceSample(
     val prices: ActiveMarketplaceConditionPrices,
     val rowCount: Int,
     val emptyConfirmed: Boolean,
-    val blocked: Boolean = false
+    val blocked: Boolean = false,
+    val accessStatus: MarketplaceUiPriceStatus? = null
 )
 
 fun evaluateMarketplaceConditionPriceSample(
@@ -327,17 +328,18 @@ private fun evaluateMarketplaceSampleWithRates(
                 pairs: {},
                 mediaCounts: {},
                 pairCounts: {},
+                firstPagePrices: [],
                 rowCount: rows.length,
                 emptyConfirmed: false
             };
 
             const excludedListingIds = new Set(${excludedListingIds.joinToString(prefix = "[", postfix = "]")}.map(String));
             const countedListings = new Set();
+            let pageListingsSeen = 0;
             rows.forEach(function(row) {
                 const media = getMediaCondition(row);
                 const sleeve = getSleeveCondition(row);
                 const price = getPrice(row);
-                if (!media || price === null) return;
 
                 // Responsive layouts may expose the same listing more than once.
                 const link = row.querySelector('a[href*="/sell/item/"]');
@@ -351,6 +353,13 @@ private fun evaluateMarketplaceSampleWithRates(
                     if (countedListings.has(listingId)) return;
                     countedListings.add(listingId);
                 }
+                // Ignore unrelated table rows. A recognizable listing with an
+                // unreadable price still consumes one of the first 250 slots.
+                if (!listingId && !media) return;
+                if (pageListingsSeen++ >= 250) return;
+                if (price === null) return;
+                result.firstPagePrices.push(price);
+                if (!media) return;
 
                 setMin(result.media, media, price);
                 result.mediaCounts[media] = (result.mediaCounts[media] || 0) + 1;
@@ -361,6 +370,12 @@ private fun evaluateMarketplaceSampleWithRates(
                 }
             });
 
+            result.pageTitle = document.title || '';
+            result.pageText = (document.body && document.body.innerText || '').slice(0, 6000);
+            result.challengeFrame = Array.from(document.querySelectorAll('iframe')).some(function(frame) {
+                return (frame.getAttribute('src') || '').indexOf('https://challenges.cloudflare.com/') === 0 &&
+                    frame.getClientRects().length > 0 && frame.getBoundingClientRect().height > 0;
+            });
             if (rows.length === 0) {
                 const bodyText = (document.body && document.body.innerText || '').toLowerCase();
                 result.blocked = /verify you are human|checking your browser|access denied|just a moment|enable javascript and cookies to continue/.test(bodyText);
@@ -419,11 +434,19 @@ private fun evaluateMarketplaceSampleWithRates(
                         mediaLowest = readPriceMap("media"),
                         mediaSleeveLowest = readPriceMap("pairs"),
                         mediaListingCounts = readCountMap("mediaCounts"),
-                        mediaSleeveListingCounts = readCountMap("pairCounts")
+                        mediaSleeveListingCounts = readCountMap("pairCounts"),
+                        firstPagePrices = json.optJSONArray("firstPagePrices")?.let { values ->
+                            (0 until minOf(values.length(), 250)).mapNotNull { index ->
+                                values.optDouble(index, Double.NaN).takeIf { it.isFinite() && it > 0.0 }
+                            }
+                        }.orEmpty()
                     ),
                     rowCount = json.optInt("rowCount", 0),
                     emptyConfirmed = json.optBoolean("emptyConfirmed", false),
-                    blocked = json.optBoolean("blocked", false)
+                    blocked = json.optBoolean("blocked", false),
+                    accessStatus = marketplaceAccessStatus(
+                        json.optString("pageTitle"), json.optString("pageText"), json.optBoolean("challengeFrame")
+                    )
                 )
             )
         } catch (_: Exception) {
@@ -492,6 +515,7 @@ fun beginMarketplacePriceScan(
             append('|').append(sample.emptyConfirmed)
             append('|').append(sample.prices.mediaListingCounts.toSortedMap())
             append('|').append(sample.prices.mediaSleeveListingCounts.toSortedMap())
+            append('|').append(sample.prices.firstPagePrices)
         }
     }
 
@@ -524,7 +548,7 @@ fun beginMarketplacePriceScan(
                 lastSignature = signature
 
                 if (
-                    sample.prices.mediaLowest.isNotEmpty() ||
+                    sample.prices.firstPagePrices.isNotEmpty() || sample.prices.mediaLowest.isNotEmpty() ||
                     sample.prices.mediaSleeveLowest.isNotEmpty()
                 ) {
                     lastGoodPrices = sample.prices
@@ -538,22 +562,21 @@ fun beginMarketplacePriceScan(
                     stableSamples >= MARKETPLACE_STABLE_SAMPLES_REQUIRED
 
                 when {
+                    sample.accessStatus != null -> finish(sample.accessStatus)
                     sample.blocked -> finish(MarketplaceUiPriceStatus.BLOCKED)
                     sample.emptyConfirmed && stableSamples >= 1 -> {
                         cacheMarketplaceConditionPrices(releaseId, ActiveMarketplaceConditionPrices())
                         finish(MarketplaceUiPriceStatus.NO_MATCH)
                     }
 
-                    stableEnough && lastGoodPrices != null -> {
-                        lastGoodPrices?.let { prices ->
-                            cacheMarketplaceConditionPrices(
-                                releaseId = releaseId,
-                                prices = prices,
-                                currency = "USD",
-                                pagesChecked = setOf(page),
-                                complete = true
-                            )
-                        }
+                    stableEnough && (sample.prices.firstPagePrices.isNotEmpty() || sample.prices.mediaLowest.isNotEmpty()) -> {
+                        cacheMarketplaceConditionPrices(
+                            releaseId = releaseId,
+                            prices = sample.prices,
+                            currency = "USD",
+                            pagesChecked = setOf(page),
+                            complete = true
+                        )
                         finish(MarketplaceUiPriceStatus.FRESH)
                     }
 
