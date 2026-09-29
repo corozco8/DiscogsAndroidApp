@@ -1,5 +1,51 @@
 package com.example.discogsandroidapp
 
+import com.example.discogsandroidapp.ai.AiInventoryResult
+import com.example.discogsandroidapp.ai.AiSearchScreen
+import com.example.discogsandroidapp.ai.AiSearchViewModel
+import com.example.discogsandroidapp.dashboard.OffersPlaceholderScreen
+import com.example.discogsandroidapp.dashboard.PlaceholderScreen
+import com.example.discogsandroidapp.dashboard.ProfileDashboard
+import com.example.discogsandroidapp.dashboard.RatingsWebScreen
+import com.example.discogsandroidapp.dashboard.SearchResultRow
+import com.example.discogsandroidapp.data.DiscogsOrder
+import com.example.discogsandroidapp.data.InventoryListing
+import com.example.discogsandroidapp.data.ListingRelease
+import com.example.discogsandroidapp.data.Price
+import com.example.discogsandroidapp.data.ReleasePriceSummary
+import com.example.discogsandroidapp.inventory.EditListingDialog
+import com.example.discogsandroidapp.inventory.StoreScreen
+import com.example.discogsandroidapp.orders.OrderDetailScreen
+import com.example.discogsandroidapp.orders.OrdersScreen
+import com.example.discogsandroidapp.orders.SellerInboxScreen
+import com.example.discogsandroidapp.orders.fetchOrdersByStatus
+import com.example.discogsandroidapp.orders.loadNextOrdersPage
+import com.example.discogsandroidapp.orders.matchesOrderStatus
+import com.example.discogsandroidapp.orders.navigateToOrderDetails
+import com.example.discogsandroidapp.orders.navigateToOrders
+import com.example.discogsandroidapp.orders.refreshOrders
+import com.example.discogsandroidapp.orders.restoredOrdersScrollPosition
+import com.example.discogsandroidapp.orders.sendOrderMessage
+import com.example.discogsandroidapp.orders.updateOrderStatus
+import com.example.discogsandroidapp.orders.visibleSellerOrders
+import com.example.discogsandroidapp.pricing.MarketplaceListingsScreen
+import com.example.discogsandroidapp.releases.MasterVersionsScreen
+import com.example.discogsandroidapp.releases.ProfileUiState
+import com.example.discogsandroidapp.releases.ReleaseDetails
+import com.example.discogsandroidapp.releases.ReleaseUiState
+import com.example.discogsandroidapp.releases.ReleaseViewModel
+import com.example.discogsandroidapp.releases.fetchMasterVersions
+import com.example.discogsandroidapp.releases.fetchRelease
+import com.example.discogsandroidapp.releases.returnFromMasterVersions
+import com.example.discogsandroidapp.releases.search
+import com.example.discogsandroidapp.statistics.CustomerHistoryScreen
+import com.example.discogsandroidapp.statistics.SellerInsightsViewModel
+import com.example.discogsandroidapp.statistics.SellerStatisticsScreen
+import com.example.discogsandroidapp.ui.shared.DiscogsWebScreen
+import com.example.discogsandroidapp.ui.shared.SearchDialogBridge
+import com.example.discogsandroidapp.ui.shared.collectWhileStarted
+import com.example.discogsandroidapp.ui.shared.keyboardInputArea
+
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.platform.LocalView
@@ -107,6 +153,7 @@ class MainActivity : ComponentActivity() {
                     val storeVisible = uiState is ReleaseUiState.StoreLoading || uiState is ReleaseUiState.StoreSuccess
                     val profileUiState by viewModel.profileUiState.collectWhileStarted()
                     val orderMessagesUiState by viewModel.orderMessagesUiState.collectWhileStarted()
+                    val orderStatusUpdates by viewModel.orderStatusUpdates.collectWhileStarted()
 
                     var searchQuery by remember { mutableStateOf("") }
                     LaunchedEffect(searchQuery, storeVisible) {
@@ -122,10 +169,10 @@ class MainActivity : ComponentActivity() {
                     var storeVisit by remember { mutableStateOf(0) }
                     val storeListState = key(storeVisit) { rememberLazyListState() }
                     val ordersListState = rememberLazyListState()
-                    var ordersScrollIndex by remember { mutableStateOf(0) }
-                    var ordersScrollOffset by remember { mutableStateOf(0) }
-                    var ordersScrollAnchor by remember { mutableStateOf<String?>(null) }
-                    var restoreOrdersScroll by remember { mutableStateOf(false) }
+                    var ordersScrollIndex by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
+                    var ordersScrollOffset by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
+                    var ordersScrollAnchor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                    var restoreOrdersScroll by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
                     var marketplaceReleaseId by remember { mutableStateOf<Long?>(null) }
                     var marketplacePriceSummary by remember {
                         mutableStateOf<ReleasePriceSummary?>(null)
@@ -991,12 +1038,12 @@ class MainActivity : ComponentActivity() {
                                                 state.orders.filter { matchesOrderStatus(it.status, viewModel.currentOrdersStatus) }
                                             )
 
-                                        LaunchedEffect(Unit) {
+                                        LaunchedEffect(viewModel.currentOrdersStatus) {
                                             if (restoreOrdersScroll) {
-                                                val anchorIndex = visibleOrders.indexOfFirst { it.id == ordersScrollAnchor }
-                                                val targetIndex = if (anchorIndex >= 0) anchorIndex else
-                                                    ordersScrollIndex.coerceAtMost((visibleOrders.size - 1).coerceAtLeast(0))
-                                                ordersListState.scrollToItem(targetIndex, ordersScrollOffset)
+                                                val target = restoredOrdersScrollPosition(
+                                                    visibleOrders, ordersScrollAnchor, ordersScrollIndex, ordersScrollOffset
+                                                )
+                                                ordersListState.scrollToItem(target.index, target.offset)
                                                 restoreOrdersScroll = false
                                             } else {
                                                 ordersListState.scrollToItem(0)
@@ -1028,6 +1075,9 @@ class MainActivity : ComponentActivity() {
                                                     fontWeight = FontWeight.Bold
                                                 )
 
+                                                if (state.isRefreshing) {
+                                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                                }
                                                 Box {
                                                     IconButton(onClick = { filterExpanded = true }) {
                                                         Icon(Icons.Default.FilterList, contentDescription = "Filter Orders")
@@ -1055,11 +1105,17 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             }
 
+                                            state.refreshError?.let { message ->
+                                                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(message, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                                                    TextButton(onClick = { viewModel.refreshOrders(token) }) { Text("Retry") }
+                                                }
+                                            }
                                             OrdersScreen(
                                                 orders = visibleOrders,
                                                 listState = ordersListState,
                                                 isFetchingMore = state.isFetchingMore,
-                                                hasMore = state.hasMore,
+                                                hasMore = state.hasMore && !state.isRefreshing,
                                                 onLoadMore = {
                                                     viewModel.loadNextOrdersPage(
                                                         token
@@ -1149,6 +1205,7 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrderDetails -> {
                                         OrderDetailScreen(
                                             order = state.order,
+                                            statusUpdate = orderStatusUpdates[state.order.id],
                                             messageState = orderMessagesUiState,
                                             onBackClick = {
                                                 if (returnToSellerInbox) {

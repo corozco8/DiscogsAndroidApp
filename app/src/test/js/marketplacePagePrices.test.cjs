@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync(path.resolve(__dirname, '../../main/java/com/example/discogsandroidapp/MarketplaceConditionPriceProbe.kt'), 'utf8');
+const source = fs.readFileSync(path.resolve(__dirname, '../../main/java/com/example/discogsandroidapp/pricing/MarketplaceConditionPriceProbe.kt'), 'utf8');
 const template = source.split('val script = """')[1].split('""".trimIndent()')[0];
 function read(rows, { excluded = [], body = '', title = 'Discogs Marketplace', frames = [] } = {}) {
     const script = template

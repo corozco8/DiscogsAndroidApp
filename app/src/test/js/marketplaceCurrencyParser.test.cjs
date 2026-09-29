@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync(process.argv[2] || path.resolve(__dirname, '../../main/java/com/example/discogsandroidapp/MarketplaceConditionPriceProbe.kt'), 'utf8');
+const source = fs.readFileSync(process.argv[2] || path.resolve(__dirname, '../../main/java/com/example/discogsandroidapp/pricing/MarketplaceConditionPriceProbe.kt'), 'utf8');
 const parser = source.slice(source.indexOf('            function parseUsdPrice('), source.indexOf('            function canonicalGrade('));
 assert.ok(parser.length > 500);
 const context = { USD_RATES: { USD: 1, CAD: 0.8, AUD: 0.65, NZD: 0.6, EUR: 1.1, GBP: 1.3, JPY: 0.007, CHF: 1.2, MXN: 0.05, BRL: 0.2 } };
