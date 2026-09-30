@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class MarketplaceVerificationTest {
+    @Test fun listingCommentsCannotDeclareARateLimitOrAChallenge() {
+        assertNull(marketplaceAccessStatus("Discogs Marketplace", "Rate limited edition; too many requests. Cloudflare verify you are human; access denied",
+            hasMarketplaceListings = true))
+        assertEquals(MarketplaceUiPriceStatus.RATE_LIMITED, marketplaceAccessStatus("Discogs", "",
+            httpStatus = 429, hasMarketplaceListings = true))
+    }
     @Test fun identifiesAnExplicitCloudflareChallenge() {
         assertEquals(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED,
             marketplaceAccessStatus("Just a moment…", "Cloudflare: Verify you are human", httpStatus = 403))

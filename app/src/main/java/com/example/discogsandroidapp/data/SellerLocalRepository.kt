@@ -227,7 +227,7 @@ class SellerLocalRepository(context: Context) {
     suspend fun syncRecentOrders(
         token: String,
         recentPages: Int = 5,
-        backfillPagesPerRun: Int = Int.MAX_VALUE,
+        backfillPagesPerRun: Int = 2,
         priorListingDates: Map<Long, Long> = emptyMap()
     ) = ordersSyncMutex.withLock {
         require(token.isNotBlank()) {

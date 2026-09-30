@@ -717,7 +717,8 @@ data class SearchResult(
     val thumb: String? = null,
     val country: String? = null,
     val format: List<String>? = emptyList(),
-    val catno: String? = null
+    val catno: String? = null,
+    @SerialName("cover_image") val coverImage: String? = null
 )
 
 @Serializable

@@ -1,6 +1,8 @@
 package com.example.discogsandroidapp.inventory
 
 import com.example.discogsandroidapp.data.InventoryListing
+import com.example.discogsandroidapp.data.ReleaseCardMetadata
+import com.example.discogsandroidapp.data.ReleaseMetadataCache
 import com.example.discogsandroidapp.data.Price
 import com.example.discogsandroidapp.network.RetrofitClient
 import com.example.discogsandroidapp.ui.shared.SearchAccessibleDialog
@@ -638,38 +640,27 @@ fun getShortGrade(grade: String): String {
 }
 
 @Composable
-fun ListingDetailsDialog(
+internal fun ListingDetailsDialog(
     listing: InventoryListing,
     token: String,
     onDismiss: () -> Unit,
-    onEditClick: () -> Unit,
-    onViewClick: () -> Unit
+    onEditClick: (() -> Unit)?,
+    onViewClick: () -> Unit,
+    allowSearchFocus: Boolean = true
 ) {
-    var highResolutionImageUrl by remember(listing.release.id) {
-        mutableStateOf<String?>(null)
+    val previewContext = LocalContext.current.applicationContext
+    var metadata by remember(listing.release.id) { mutableStateOf<ReleaseCardMetadata?>(null) }
+    var metadataError by remember(listing.release.id) { mutableStateOf(false) }
+    var metadataAttempt by remember(listing.release.id) { mutableStateOf(0) }
+    LaunchedEffect(listing.release.id, token, metadataAttempt) {
+        metadataError = false
+        try {
+            metadata = ReleaseMetadataCache.get(previewContext, listing.release.id, token)
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { metadataError = true }
     }
 
-    // Inventory payloads only include Discogs' small thumbnail. Fetch the
-    // release once when the preview opens so the dialog can use the original
-    // release image instead of stretching the low-resolution thumbnail.
-    LaunchedEffect(listing.release.id, token) {
-        highResolutionImageUrl =
-            try {
-                RetrofitClient.apiService
-                    .getRelease(
-                        releaseId = listing.release.id,
-                        authHeader = "Discogs token=$token"
-                    )
-                    .images
-                    ?.firstOrNull()
-                    ?.uri
-                    ?.takeIf { it.isNotBlank() }
-            } catch (_: Exception) {
-                null
-            }
-    }
-
-    SearchAccessibleDialog(onDismissRequest = onDismiss) {
+    SearchAccessibleDialog(onDismissRequest = onDismiss, allowSearchFocus = allowSearchFocus) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -682,7 +673,7 @@ fun ListingDetailsDialog(
                 ) {
                 AsyncImage(
                     model =
-                        highResolutionImageUrl
+                        metadata?.image
                             ?: listing.release.thumbnail.takeIf { it.isNotBlank() }
                             ?: "https://via.placeholder.com/600",
                     contentDescription = "Cover",
@@ -703,6 +694,27 @@ fun ListingDetailsDialog(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+
+                    Text("Media: ${getShortGrade(listing.condition)} · Sleeve: ${getShortGrade(listing.sleeve_condition)}",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (metadata != null) {
+                        Text("Genre: ${metadata!!.genres.joinToString(", ").ifBlank { "Not specified" }}",
+                            fontSize = 14.sp)
+                        if (metadata!!.styles.isNotEmpty()) Text("Style: ${metadata!!.styles.joinToString(", ")}", fontSize = 12.sp)
+                        val edition = listOfNotNull(metadata!!.year?.takeIf { it > 0 }?.toString(),
+                            metadata!!.format.takeIf { it.isNotBlank() }).joinToString(" · ")
+                        if (edition.isNotBlank()) Text(edition, fontSize = 12.sp)
+                    } else if (metadataError) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Genre unavailable", fontSize = 12.sp, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { metadataAttempt++ }) { Text("Retry") }
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Text("Loading genre…", fontSize = 12.sp)
+                        }
+                    }
 
                     val priceText = listing.price?.let {
                         String.format(java.util.Locale.getDefault(), "%s %.2f", it.currency, it.value)
@@ -748,11 +760,14 @@ fun ListingDetailsDialog(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
+                        if (onEditClick != null) OutlinedButton(
                             onClick = onEditClick,
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("Edit")
+                        }
+                        if (onEditClick == null) OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                            Text("Close")
                         }
                         Button(
                             onClick = onViewClick,

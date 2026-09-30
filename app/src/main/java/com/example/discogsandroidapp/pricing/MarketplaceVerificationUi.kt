@@ -81,8 +81,21 @@ internal fun ListingPricingNotice(
     onRefresh: (() -> Unit)?
 ) {
     if (info == null || info.status in setOf(MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED)) return
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(info.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val notice = when (info.status) {
+        MarketplaceUiPriceStatus.LOADING -> "Checking live prices…"
+        MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> "Discogs verification required"
+        MarketplaceUiPriceStatus.RATE_LIMITED -> "Marketplace requests paused"
+        MarketplaceUiPriceStatus.NETWORK -> "Live pricing offline"
+        MarketplaceUiPriceStatus.TIMEOUT -> "Live pricing timed out"
+        MarketplaceUiPriceStatus.NO_MATCH -> "No matching live prices"
+        MarketplaceUiPriceStatus.BLOCKED -> "Marketplace access blocked"
+        MarketplaceUiPriceStatus.PARTIAL -> "Some listings could not be read"
+        else -> "Live prices unavailable"
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(notice, modifier = Modifier.weight(1f), maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (info.status == MarketplaceUiPriceStatus.VERIFICATION_REQUIRED && onVerify != null) {
             TextButton(onClick = onVerify, enabled = enabled) { Text("Verify Discogs") }
         } else if (info.status != MarketplaceUiPriceStatus.LOADING && onRefresh != null) {
@@ -98,7 +111,11 @@ internal fun ListingPricingNotice(
 internal fun MarketplacePricingUnavailable(pricing: MarketplacePricingController, modifier: Modifier = Modifier) {
     Column(modifier.padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(pricing.message)
-        TextButton(onClick = pricing::refresh, enabled = pricing.retryInSeconds == 0L) {
+        if (pricing.status == MarketplaceUiPriceStatus.LOADING) {
+            CircularProgressIndicator(modifier = Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
+        }
+        TextButton(onClick = pricing::refresh, enabled = pricing.retryInSeconds == 0L &&
+            pricing.status != MarketplaceUiPriceStatus.LOADING) {
             Text(if (pricing.retryInSeconds > 0) "Retry in ${pricing.retryInSeconds}s" else "Open listings")
         }
     }

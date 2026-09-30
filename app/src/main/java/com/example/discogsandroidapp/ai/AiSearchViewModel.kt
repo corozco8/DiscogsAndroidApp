@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 sealed interface AiSearchUiState {
 
@@ -29,6 +31,34 @@ sealed interface AiSearchUiState {
 class AiSearchViewModel : ViewModel() {
 
     private var searchJob: Job? = null
+    private var inventoryJob: Job? = null
+    private val inventoryMutex = Mutex()
+    private var inventoryOpened = false
+    private val downloading = MutableStateFlow(false)
+    val downloadingInventory = downloading.asStateFlow()
+    private val downloadError = MutableStateFlow<String?>(null)
+    val inventoryError = downloadError.asStateFlow()
+
+    fun onOpened() {
+        if (inventoryJob?.isActive == true) return
+        inventoryJob = viewModelScope.launch {
+            try { prepareInventory() }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { downloadError.value = "Inventory download failed. Tap Retry." }
+        }
+    }
+
+    private suspend fun prepareInventory() = inventoryMutex.withLock {
+        if (inventoryOpened && !AiCacheSyncTracker.needsFullSync()) return@withLock
+        downloading.value = true
+        downloadError.value = null
+        try {
+            val revision = AiCacheSyncTracker.captureRevision()
+            BackendRetrofitClient.apiService.syncInventory()
+            AiCacheSyncTracker.markFullSyncComplete(revision)
+            inventoryOpened = true
+        } finally { downloading.value = false }
+    }
 
     // Query that produced the currently displayed successful results.
     // Keep this separate from the editable text field so an edit that
@@ -113,16 +143,7 @@ class AiSearchViewModel : ViewModel() {
                 // If a prior Discogs mutation succeeded while the optional
                 // AI backend/cache update failed, repair the full inventory
                 // snapshot before answering another AI question.
-                if (AiCacheSyncTracker.needsFullSync()) {
-                    val revisionAtStart =
-                        AiCacheSyncTracker.captureRevision()
-
-                    BackendRetrofitClient.apiService
-                        .syncInventory()
-
-                    AiCacheSyncTracker
-                        .markFullSyncComplete(revisionAtStart)
-                }
+                prepareInventory()
 
                 val response =
                     BackendRetrofitClient.apiService.search(

@@ -6,10 +6,12 @@ internal fun marketplaceAccessStatus(
     body: String,
     hasChallengeFrame: Boolean = false,
     challengeHeader: Boolean = false,
-    httpStatus: Int? = null
+    httpStatus: Int? = null,
+    hasMarketplaceListings: Boolean = false
 ): MarketplaceUiPriceStatus? {
-    val text = "$title\n$body".lowercase(java.util.Locale.ROOT)
-    if (httpStatus == 429 || Regex("too many requests|rate limit(?:ed| exceeded)|error\\s*1015").containsMatchIn(text)) {
+    val text = (if (hasMarketplaceListings) title else "$title\n$body").lowercase(java.util.Locale.ROOT)
+    if (httpStatus == 429 || (!hasMarketplaceListings &&
+            Regex("too many requests|rate limit(?:ed| exceeded)|error\\s*1015").containsMatchIn(text))) {
         return MarketplaceUiPriceStatus.RATE_LIMITED
     }
     val challengeText = Regex(

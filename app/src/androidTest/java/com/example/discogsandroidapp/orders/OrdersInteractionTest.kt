@@ -19,6 +19,29 @@ import org.junit.runner.RunWith
 class OrdersInteractionTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun itemPreviewKeepsTheOrderAndItsListedDateInPlace() {
+        var releaseOpens = 0
+        compose.setContent {
+            MaterialTheme {
+                OrderDetailScreen(
+                    order = DiscogsOrder(id = "preview-test", status = "Payment Received", items = listOf(
+                        OrderItem(release = OrderReleaseInfo(id = 1234, title = "Preview record", thumbnail = ""),
+                            posted = "2024-01-02", comments = "Original sleeve")
+                    )),
+                    messageState = OrderMessagesUiState.Idle,
+                    onBackClick = {}, onStatusChange = {}, onItemClick = { releaseOpens++ },
+                    onSendMessage = { _, _ -> }, onLeaveBuyerFeedback = {}
+                )
+            }
+        }
+        compose.onNodeWithText("Listed Jan 2, 2024").assertExists()
+        compose.onNodeWithText("Preview record").performClick()
+        compose.onNodeWithText("Close").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Order #preview-test").assertIsDisplayed()
+        compose.onNodeWithText("Listed Jan 2, 2024").assertExists()
+        compose.runOnIdle { assertEquals(0, releaseOpens) }
+    }
+
     @Test fun inProgressShowsFeedbackDisablesActionsAndAllowsRetryAfterFailure() {
         val update = mutableStateOf<OrderStatusUpdateState?>(null)
         var writes = 0

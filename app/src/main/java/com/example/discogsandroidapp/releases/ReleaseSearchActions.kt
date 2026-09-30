@@ -2,6 +2,7 @@ package com.example.discogsandroidapp.releases
 
 import com.example.discogsandroidapp.data.Price
 import com.example.discogsandroidapp.data.ReleasePriceSummary
+import com.example.discogsandroidapp.data.ReleaseMetadataCache
 import com.example.discogsandroidapp.data.isAlbumFormat
 import com.example.discogsandroidapp.network.RetrofitClient
 
@@ -32,12 +33,8 @@ fun ReleaseViewModel.search(query: String, token: String) {
         _uiState.value = ReleaseUiState.Loading
 
         try {
-            val authHeader = "Discogs token=$token"
-            val response =
-                RetrofitClient.apiService.searchDatabase(
-                    query = query,
-                    authHeader = authHeader
-                )
+            ReleaseSearchHistory.remember(getApplication(), query = query)
+            val response = ReleaseSearchRepository.search(query, token)
 
             if (generation == navigationRequestGeneration) {
                 _uiState.value =
@@ -72,6 +69,7 @@ fun ReleaseViewModel.fetchRelease(releaseId: Long, token: String) {
                 releaseId = releaseId,
                 authHeader = authHeader
             )
+            ReleaseMetadataCache.put(getApplication(), releaseResponse)
 
             if (generation != navigationRequestGeneration) {
                 return@launch

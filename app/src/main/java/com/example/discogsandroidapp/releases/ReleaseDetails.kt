@@ -54,7 +54,7 @@ import androidx.compose.ui.text.input.KeyboardType
 private const val TAG = "ReleaseDetails"
 
 @Composable
-fun ReleaseDetails(
+internal fun ReleaseDetails(
     release: DiscogsRelease,
     priceSummary: ReleasePriceSummary? = null,
     onBackClick: () -> Unit,
@@ -65,7 +65,8 @@ fun ReleaseDetails(
     onViewListingsClick: (releaseId: Long) -> Unit = {},
     onViewVersionsClick: (masterId: Long) -> Unit = {},
     onRefresh: (() -> Unit)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    pricingController: com.example.discogsandroidapp.pricing.MarketplacePricingController? = null
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
     var isSubmittingListing by remember { mutableStateOf(false) }
@@ -73,7 +74,7 @@ fun ReleaseDetails(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val releaseId = release.id
-    val pricing = rememberMarketplacePricing(releaseId)
+    val pricing = pricingController ?: rememberMarketplacePricing(releaseId)
     val effectivePriceSummary = pricing.prices?.let {
         (priceSummary ?: ReleasePriceSummary()).withActiveMarketplacePrices(it)
     } ?: priceSummary

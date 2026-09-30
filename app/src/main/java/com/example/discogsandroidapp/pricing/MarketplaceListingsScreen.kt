@@ -27,20 +27,27 @@ import androidx.compose.ui.unit.dp
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 @Composable
-fun MarketplaceListingsScreen(
+internal fun MarketplaceListingsScreen(
     releaseId: Long,
     priceSummary: ReleasePriceSummary? = null,
     viewModel: ReleaseViewModel,
     token: String,
     onBackClick: () -> Unit,
     onSearchRequested: (String) -> Unit,
-    onBarcodeSearchRequested: (String) -> Unit
+    onBarcodeSearchRequested: (String) -> Unit,
+    pricingController: MarketplacePricingController? = null,
+    suggestionsModel: com.example.discogsandroidapp.releases.ReleaseSearchSuggestionsViewModel? = null,
+    onReleaseRequested: (com.example.discogsandroidapp.data.SearchResult) -> Unit = {}
 ) {
     var showSellDialog by remember { mutableStateOf(false) }
     var isSubmittingListing by remember { mutableStateOf(false) }
     var listingSubmissionError by remember { mutableStateOf<String?>(null) }
     var marketplaceSearchQuery by remember(releaseId) { mutableStateOf("") }
-    val pricing = rememberMarketplacePricing(releaseId)
+    val suggestions = suggestionsModel ?: androidx.lifecycle.viewmodel.compose.viewModel<com.example.discogsandroidapp.releases.ReleaseSearchSuggestionsViewModel>()
+    val pricing = pricingController ?: rememberMarketplacePricing(releaseId)
+    LaunchedEffect(pricing, pricing.ready) {
+        pricing.requestVisiblePage()
+    }
     val effectivePriceSummary = pricing.prices?.let {
         (priceSummary ?: ReleasePriceSummary()).withActiveMarketplacePrices(it)
     } ?: priceSummary
@@ -102,54 +109,13 @@ fun MarketplaceListingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
+                    com.example.discogsandroidapp.releases.ReleaseSearchField(
                         value = marketplaceSearchQuery,
                         onValueChange = { marketplaceSearchQuery = it },
-                        placeholder = { Text("Search...") },
-                        singleLine = true,
-                        modifier = Modifier.keyboardInputArea().weight(1f),
-                        leadingIcon = {
-                            IconButton(
-                                onClick = {
-                                    val query = marketplaceSearchQuery.trim()
-                                    if (query.isNotEmpty()) {
-                                        focusManager.clearFocus(force = true)
-                                        keyboardController?.hide()
-                                        onSearchRequested(query)
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = "Search"
-                                )
-                            }
-                        },
-                        trailingIcon = {
-                            if (marketplaceSearchQuery.isNotEmpty()) {
-                                IconButton(
-                                    onClick = { marketplaceSearchQuery = "" }
-                                ) {
-                                    Icon(
-                                        Icons.Default.Clear,
-                                        contentDescription = "Clear Search"
-                                    )
-                                }
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(
-                            imeAction = ImeAction.Search
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onSearch = {
-                                val query = marketplaceSearchQuery.trim()
-                                if (query.isNotEmpty()) {
-                                    focusManager.clearFocus(force = true)
-                                    keyboardController?.hide()
-                                    onSearchRequested(query)
-                                }
-                            }
-                        )
+                        suggestions = suggestions, token = token,
+                        onSearch = onSearchRequested,
+                        onRelease = onReleaseRequested,
+                        modifier = Modifier.weight(1f)
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))

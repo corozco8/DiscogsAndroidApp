@@ -127,6 +127,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val viewModel: ReleaseViewModel = viewModel()
+            val searchSuggestions: com.example.discogsandroidapp.releases.ReleaseSearchSuggestionsViewModel = viewModel()
             val aiSearchViewModel: AiSearchViewModel = viewModel()
             val sellerInsightsViewModel: SellerInsightsViewModel = viewModel()
             val appContext = LocalContext.current.applicationContext
@@ -453,10 +454,24 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // If a user clicked "View Listings", overlay the Marketplace screen!
+                    val pricingReleaseId = marketplaceReleaseId
+                        ?: (uiState as? ReleaseUiState.ReleaseSuccess)?.release?.id
+                    val sharedPricing = com.example.discogsandroidapp.pricing.rememberMarketplacePricing(pricingReleaseId)
                     if (marketplaceReleaseId != null) {
                         MarketplaceListingsScreen(
                             releaseId = marketplaceReleaseId!!,
                             priceSummary = marketplacePriceSummary,
+                            pricingController = sharedPricing,
+                            suggestionsModel = searchSuggestions,
+                            onReleaseRequested = { result ->
+                                marketplaceReleaseId = null
+                                marketplacePriceSummary = null
+                                searchQuery = result.title
+                                returnToStore = false
+                                returnToAiSearch = false
+                                returnToOrderDetails = null
+                                viewModel.fetchRelease(result.id.toLong(), token)
+                            },
                             viewModel = viewModel,
                             token = token,
                             onBackClick = {
@@ -557,26 +572,21 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
 
-                                    OutlinedTextField(
+                                    com.example.discogsandroidapp.releases.ReleaseSearchField(
                                         value = searchQuery,
                                         onValueChange = { searchQuery = it },
-                                        label = {
-                                            Text(
-                                                if (
-                                                    uiState is ReleaseUiState.StoreSuccess ||
-                                                    uiState is ReleaseUiState.StoreLoading
-                                                ) {
-                                                    "Search My Store..."
-                                                } else {
-                                                    "Search..."
-                                                },
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                        suggestions = searchSuggestions, token = token,
+                                        storeMode = storeVisible,
+                                        focusRequester = searchFocusRequester,
+                                        onSearch = { query -> if (!storeVisible) viewModel.search(query, token) },
+                                        onRelease = { result ->
+                                            if (searchQuery.isBlank()) searchQuery = result.title
+                                            returnToStore = false
+                                            returnToAiSearch = false
+                                            returnToOrderDetails = null
+                                            viewModel.fetchRelease(result.id.toLong(), token)
                                         },
-                                        modifier = Modifier.keyboardInputArea()
-                                            .weight(1f)
-                                            .focusRequester(searchFocusRequester)
+                                        modifier = Modifier.weight(1f)
                                             .onGloballyPositioned { coordinates ->
                                                 val screen = IntArray(2)
                                                 val window = IntArray(2)
@@ -586,47 +596,7 @@ class MainActivity : ComponentActivity() {
                                                     (screen[0] - window[0]).toFloat(),
                                                     (screen[1] - window[1]).toFloat()
                                                 )
-                                            },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(
-                                            imeAction = ImeAction.Search
-                                        ),
-                                        keyboardActions = KeyboardActions(
-                                            onSearch = {
-                                                if (
-                                                    uiState !is ReleaseUiState.StoreSuccess &&
-                                                    uiState !is ReleaseUiState.StoreLoading
-                                                ) {
-                                                    viewModel.search(
-                                                        searchQuery,
-                                                        token
-                                                    )
-                                                }
-                                                // My Store search is filtered locally from the
-                                                // synchronized full inventory as the user types.
-                                                keyboardController?.hide()
                                             }
-                                        ),
-                                        trailingIcon = {
-                                            if (searchQuery.isNotEmpty()) {
-                                                IconButton(
-                                                    onClick = {
-                                                        searchQuery = ""
-
-                                                        searchFocusRequester.requestFocus()
-                                                        appScope.launch {
-                                                            kotlinx.coroutines.delay(80)
-                                                            keyboardController?.show()
-                                                        }
-                                                    }
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Clear,
-                                                        contentDescription = "Clear Search"
-                                                    )
-                                                }
-                                            }
-                                        }
                                     )
 
                                     Spacer(
@@ -908,6 +878,7 @@ class MainActivity : ComponentActivity() {
                                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                                             items(state.results) { result ->
                                                 SearchResultRow(result = result) {
+                                                    if (result.type == "release") searchSuggestions.selected(result)
                                                     when (result.type) {
                                                         "release" -> {
                                                             viewModel.fetchRelease(releaseId = result.id.toLong(), token = token)
@@ -934,6 +905,7 @@ class MainActivity : ComponentActivity() {
                                         ReleaseDetails(
                                             release = state.release,
                                             priceSummary = state.priceSummary,
+                                            pricingController = sharedPricing,
                                             onBackClick = { performSmartBack() },
                                             onSellConfirm = { price, condition, sleeve, comments, onResult ->
                                                 viewModel.createListing(
@@ -1205,6 +1177,7 @@ class MainActivity : ComponentActivity() {
                                     is ReleaseUiState.OrderDetails -> {
                                         OrderDetailScreen(
                                             order = state.order,
+                                            token = token,
                                             statusUpdate = orderStatusUpdates[state.order.id],
                                             messageState = orderMessagesUiState,
                                             onBackClick = {

@@ -60,6 +60,9 @@ fun AiSearchScreen(
 ) {
     val query by viewModel.query.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
+    val downloading by viewModel.downloadingInventory.collectAsState()
+    val inventoryError by viewModel.inventoryError.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(viewModel) { viewModel.onOpened() }
 
     var selectedListingIds by remember {
         mutableStateOf<Set<Long>>(emptySet())
@@ -158,6 +161,19 @@ fun AiSearchScreen(
             modifier = Modifier.height(16.dp)
         )
 
+        if (downloading) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("Downloading inventory…")
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+        inventoryError?.let { message ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(message, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = viewModel::onOpened) { Text("Retry") }
+            }
+        }
         OutlinedTextField(
             value = query,
             onValueChange = viewModel::updateQuery,
@@ -168,6 +184,7 @@ fun AiSearchScreen(
             singleLine = true,
             trailingIcon = {
                 IconButton(
+                    enabled = !downloading,
                     onClick = {
                         viewModel.search()
                     }

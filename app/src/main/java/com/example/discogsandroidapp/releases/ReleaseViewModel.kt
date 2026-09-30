@@ -43,8 +43,6 @@ import androidx.compose.runtime.mutableStateOf
 
 class ReleaseViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
 
-    private var aiCacheRefreshJob: Job? = null
-    private var aiCacheRefreshRequested = false
 
 
     internal val _uiState = MutableStateFlow<ReleaseUiState>(ReleaseUiState.Idle)
@@ -483,63 +481,6 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         }
     }
 
-    private fun refreshAiCacheInBackground() {
-        // Mark that a full refresh is needed. If one is already running, do
-        // not launch another request. The active worker will perform at most
-        // one follow-up refresh if another invalidation arrives mid-download.
-        AiCacheSyncTracker.markDirty()
-        aiCacheRefreshRequested = true
-
-        if (aiCacheRefreshJob?.isActive == true) {
-            return
-        }
-
-        aiCacheRefreshJob = viewModelScope.launch {
-            // Combine rapid create/delete bursts before the first download.
-            delay(750)
-
-            while (aiCacheRefreshRequested) {
-                aiCacheRefreshRequested = false
-
-                try {
-                    val revisionAtStart =
-                        AiCacheSyncTracker.captureRevision()
-
-                    BackendRetrofitClient.apiService
-                        .syncInventory()
-
-                    AiCacheSyncTracker
-                        .markFullSyncComplete(revisionAtStart)
-
-                    // A mutation that happened during the download remains
-                    // dirty because it has a newer revision. Ensure it gets a
-                    // follow-up refresh even if a caller forgot to set the
-                    // local requested flag.
-                    if (AiCacheSyncTracker.needsFullSync()) {
-                        aiCacheRefreshRequested = true
-                    }
-                } catch (cacheError: Exception) {
-                    AiCacheSyncTracker.markDirty()
-                    // AI search is optional. Keep the normal seller workflow
-                    // usable, but leave a clear log that synchronization did
-                    // not complete. A later mutation/request will retry.
-                    Log.w(
-                        "INVENTORY_CACHE",
-                        "Could not refresh the optional AI inventory cache.",
-                        cacheError
-                    )
-                    break
-                }
-
-                if (aiCacheRefreshRequested) {
-                    // Small settle window for another burst that happened
-                    // while the previous network refresh was in flight.
-                    delay(250)
-                }
-            }
-        }
-    }
-
     private suspend fun updateAiCacheListingAfterEdit(
         listingId: Long,
         price: Double,
@@ -566,19 +507,9 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
             ) {
                 true
             } else {
-                // The row may be missing OR an earlier mutation may have
-                // failed to reach the cache. A full synchronization is the
-                // only safe point at which AI results can be called current.
-                val revisionAtStart =
-                    AiCacheSyncTracker.captureRevision()
-
-                BackendRetrofitClient.apiService
-                    .syncInventory()
-
-                AiCacheSyncTracker
-                    .markFullSyncComplete(revisionAtStart)
-
-                true
+                // A missing row requires a full download when AI search is next opened.
+                AiCacheSyncTracker.markDirty()
+                false
             }
 
         } catch (cacheError: Exception) {
@@ -593,9 +524,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                 cacheError
             )
 
-            // Queue one best-effort full refresh for when the backend is
-            // reachable again / a later request succeeds.
-            refreshAiCacheInBackground()
+            // The next explicit AI search visit can repair the missing cache.
             false
         }
     }
@@ -986,7 +915,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                     if (_uiState.value is ReleaseUiState.StoreSuccess || _uiState.value is ReleaseUiState.StoreLoading) {
                         fetchStoreInventory(token, currentSort, currentSortOrder)
                     }
-                    refreshAiCacheInBackground()
+                    AiCacheSyncTracker.markDirty()
                 }
             } catch (e: CancellationException) {
                 throw e

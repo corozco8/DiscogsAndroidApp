@@ -1,6 +1,8 @@
 package com.example.discogsandroidapp.orders
 
 import com.example.discogsandroidapp.data.DiscogsOrder
+import com.example.discogsandroidapp.data.OrderItem
+import com.example.discogsandroidapp.inventory.ListingDetailsDialog
 import com.example.discogsandroidapp.releases.OrderMessagesUiState
 import com.example.discogsandroidapp.ui.shared.keyboardInputArea
 
@@ -40,8 +42,21 @@ fun OrderDetailScreen(
     onStatusChange: (String) -> Unit,
     onItemClick: (Int) -> Unit,
     onSendMessage: (String, (Boolean) -> Unit) -> Unit,
-    onLeaveBuyerFeedback: () -> Unit
+    onLeaveBuyerFeedback: () -> Unit,
+    token: String = ""
 ) {
+    var previewItem by remember(order.id) { mutableStateOf<OrderItem?>(null) }
+    previewItem?.let { selected ->
+        val item = currentOrderPreviewItem(order, selected)
+        ListingDetailsDialog(
+            listing = item.previewListing(), token = token,
+            onDismiss = { previewItem = null }, onEditClick = null, allowSearchFocus = false,
+            onViewClick = {
+                previewItem = null
+                item.release?.id?.let { onItemClick(it.toInt()) }
+            }
+        )
+    }
     var messageText by remember(order.id) {
         mutableStateOf("")
     }
@@ -165,11 +180,7 @@ fun OrderDetailScreen(
                     ElevatedCard(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                item.release?.id?.let { releaseId ->
-                                    onItemClick(releaseId.toInt())
-                                }
-                            },
+                            .clickable(enabled = (item.release?.id ?: 0) > 0) { previewItem = item },
                         shape = RoundedCornerShape(16.dp),
                         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
                         colors = CardDefaults.elevatedCardColors(
