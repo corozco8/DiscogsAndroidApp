@@ -156,6 +156,24 @@ internal fun MarketplaceListingsScreen(
         } else if (pricing.ready && !pricing.verificationVisible) {
             MarketplacePricingUnavailable(pricing, Modifier.weight(1f).fillMaxWidth())
         }
+        if (pricing.status in setOf(
+                MarketplaceUiPriceStatus.RATE_LIMITED, MarketplaceUiPriceStatus.BLOCKED,
+                MarketplaceUiPriceStatus.FAILED, MarketplaceUiPriceStatus.NETWORK,
+                MarketplaceUiPriceStatus.TIMEOUT, MarketplaceUiPriceStatus.UNREADABLE,
+                MarketplaceUiPriceStatus.PARTIAL)) {
+            Row(Modifier.fillMaxWidth().navigationBarsPadding(), horizontalArrangement = Arrangement.End) {
+                if (pricing.errorDetails != null) {
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(
+                            "Marketplace error", pricing.errorDetails.orEmpty()))
+                        android.widget.Toast.makeText(context, "Error details copied", android.widget.Toast.LENGTH_SHORT).show()
+                    }) { Text("Copy error details") }
+                }
+                TextButton(onClick = pricing::refresh) { Text("Refresh") }
+            }
+        }
     }
 
     LaunchedEffect(showSellDialog, isSubmittingListing, pricing.status) {

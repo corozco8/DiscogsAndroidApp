@@ -36,18 +36,20 @@ class MarketplaceVerificationTest {
     @Test fun automaticVerificationOnlyOpensOnceUntilAccessSucceeds() {
         val gate = MarketplaceVerificationGate()
         val challenge = MarketplaceUiPriceStatus.VERIFICATION_REQUIRED
-        assertTrue(gate.shouldOpen(challenge, automatic = true, rateLimited = false))
-        assertFalse(gate.shouldOpen(challenge, automatic = true, rateLimited = false))
-        assertTrue(gate.shouldOpen(challenge, automatic = false, rateLimited = false))
+        assertTrue(gate.shouldOpen(challenge, automatic = true))
+        assertFalse(gate.shouldOpen(challenge, automatic = true))
+        assertTrue(gate.shouldOpen(challenge, automatic = false))
         gate.verified()
-        assertTrue(gate.shouldOpen(challenge, automatic = true, rateLimited = false))
+        assertTrue(gate.shouldOpen(challenge, automatic = true))
     }
 
-    @Test fun verificationCannotStartDuringACooldownForRateLimiting() {
+    @Test fun rateLimitingNeverOpensVerificationOrPreventsALaterChallenge() {
         val gate = MarketplaceVerificationGate()
-        assertFalse(gate.shouldOpen(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, false, true))
-        assertFalse(gate.shouldOpen(MarketplaceUiPriceStatus.RATE_LIMITED, false, false))
-        assertTrue(gate.shouldOpen(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, true, false))
+        assertFalse(gate.shouldOpen(MarketplaceUiPriceStatus.RATE_LIMITED, automatic = true))
+        assertFalse(gate.shouldOpen(MarketplaceUiPriceStatus.RATE_LIMITED, automatic = false))
+        assertTrue(gate.shouldOpen(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, automatic = true))
+        assertFalse(gate.shouldOpen(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, automatic = true))
+        assertTrue(gate.shouldOpen(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED, automatic = false))
     }
 
     @Test fun estimatesAndCachedPricesHaveDistinctSources() {

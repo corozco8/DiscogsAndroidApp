@@ -29,6 +29,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -692,6 +693,7 @@ fun OrderDetailScreen(
                                 maxLines = 5,
                                 shape = RoundedCornerShape(14.dp),
                                 keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.Sentences,
                                     imeAction = ImeAction.Send
                                 ),
                                 keyboardActions = KeyboardActions(

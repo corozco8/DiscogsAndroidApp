@@ -58,16 +58,16 @@ class ReleasePriceSummaryTest {
     }
 
     @Test
-    fun fallbackRetainsPreviousPremiumSleeveRule() {
+    fun fallbackUsesAModestPremiumForNearMintSleeves() {
         val summary = ReleasePriceSummary(
             priceSuggestions = suggestions()
         )
 
         assertEquals(
-            kotlin.math.round(summary.fallbackRecommendedPriceFor("Very Good Plus (VG+)")!! * 1.15 * 100.0) / 100.0,
+            31.50,
             summary.fallbackRecommendedPriceFor(
                 "Very Good Plus (VG+)",
-                "Very Good Plus (VG+)"
+                "Near Mint (NM or M-)"
             )!!,
             0.0
         )
@@ -138,5 +138,32 @@ class ReleasePriceSummaryTest {
         assertEquals(23.99, summary.recommendedPriceFor(vgp)!!, 0.0)
         assertEquals(14.40, summary.recommendedPriceFor(vg)!!, 0.0)
         assertEquals(10.0, live(mapOf(vgp to 6.0)).recommendedPriceFor(nm)!!, 0.0)
+    }
+
+    @Test fun missingVgPlusUsesTheMidpointOfNearMintAndVeryGoodAsks() {
+        val nm = "Near Mint (NM or M-)"
+        val summary = live(mapOf(nm to 20.0, vg to 8.0))
+        val estimate = summary.liveGradeEstimateFor(vgp)!!
+        assertEquals(14.0, estimate.price, 0.0)
+        assertEquals(nm, estimate.sourceCondition)
+        assertEquals(vg, estimate.secondSourceCondition)
+        assertEquals(14.0, summary.recommendedPriceFor(vgp)!!, 0.0)
+    }
+    @Test fun aMatchingVgPlusAskWinsOverInterpolation() {
+        val summary = live(mapOf("Near Mint (NM or M-)" to 20.0, vgp to 12.0, vg to 8.0))
+        assertEquals(12.0, summary.recommendedPriceFor(vgp)!!, 0.0)
+        assertNull(summary.liveGradeEstimateFor(vgp))
+    }
+    @Test fun contradictoryOrTooCloseGradesDoNotCreateAnInterpolatedPrice() {
+        val nm = "Near Mint (NM or M-)"
+        assertNull(live(mapOf(nm to 10.0, vg to 20.0)).liveGradeEstimateFor(vgp))
+        assertNull(live(mapOf(nm to 20.0, vg to 19.0)).liveGradeEstimateFor(vgp))
+    }
+    @Test fun interpolationRetainsSleeveExclusions() {
+        val nm = "Near Mint (NM or M-)"
+        val summary = live(mapOf(nm to 20.0, vg to 8.0)).copy(isAlbumRelease = true,
+            activeMediaSleeveLowestPrices = mapOf("$nm||$vgp" to 20.0, "$vg||Poor (P)" to 8.0),
+            activeMediaSleeveListingCounts = mapOf("$nm||$vgp" to 2, "$vg||Poor (P)" to 2))
+        assertEquals(12.0, summary.liveGradeEstimateFor(vgp, vgp)!!.price, 0.0)
     }
 }

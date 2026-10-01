@@ -3,8 +3,11 @@ package com.example.discogsandroidapp.releases
 import com.example.discogsandroidapp.data.DiscogsSearchResponse
 import com.example.discogsandroidapp.data.SearchResult
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -73,5 +76,63 @@ class SearchSuggestionsTest {
         try { cache.search("Rumours", "one") { error("offline") } } catch (_: IllegalStateException) { }
         val response = DiscogsSearchResponse(listOf(SearchResult(5, "Artist - Rumours")))
         assertEquals(response, cache.search("Rumours", "one") { response })
+    }
+    @Test fun aSlowQueryDoesNotBlockAnotherQueryOrCachedResults() = runBlocking {
+        val cache = ReleaseSearchCache()
+        val response = DiscogsSearchResponse(listOf(SearchResult(1, "Artist - Alice")))
+        cache.search("Alice", "one") { response }
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val slow = async { cache.search("Rumours", "one") { started.complete(Unit); finish.await(); response } }
+        started.await()
+        try {
+            withTimeout(1_000) {
+                assertEquals(response, cache.search("Alice", "one") { error("Already cached") })
+                assertEquals(response, cache.search("Tusk", "one") { response })
+            }
+        } finally { finish.complete(Unit); slow.await() }
+    }
+    @Test fun cancellingAWaitingConsumerKeepsTheRemainingConsumersOnOneRequest() = runBlocking {
+        val cache = ReleaseSearchCache()
+        val finish = CompletableDeferred<Unit>()
+        val response = DiscogsSearchResponse(emptyList())
+        var reads = 0
+        val owner = async(start = CoroutineStart.UNDISPATCHED) {
+            cache.search("Rumours", "one") { reads++; finish.await(); response }
+        }
+        val cancelled = async(start = CoroutineStart.UNDISPATCHED) { cache.search("Rumours", "one") { reads++; response } }
+        cancelled.cancel(); cancelled.join()
+        val remaining = async(start = CoroutineStart.UNDISPATCHED) { cache.search("Rumours", "one") { reads++; response } }
+        finish.complete(Unit)
+        assertEquals(response, owner.await())
+        assertEquals(response, remaining.await())
+        assertEquals(1, reads)
+    }
+    @Test fun aCancelledOwnerDoesNotLeaveALockedQuery() = runBlocking {
+        val cache = ReleaseSearchCache()
+        val finish = CompletableDeferred<Unit>()
+        val response = DiscogsSearchResponse(emptyList())
+        val owner = async(start = CoroutineStart.UNDISPATCHED) { cache.search("Rumours", "one") { finish.await(); response } }
+        val remaining = async(start = CoroutineStart.UNDISPATCHED) { cache.search("Rumours", "one") { response } }
+        owner.cancel(); owner.join()
+        withTimeout(1_000) { assertEquals(response, remaining.await()) }
+    }
+    @Test fun immediateCacheLookupIsNormalizedAccountScopedAndExpires() = runBlocking {
+        var clock = 0L
+        val cache = ReleaseSearchCache { clock }
+        val response = DiscogsSearchResponse(emptyList())
+        cache.search("Rumours", "one") { response }
+        assertEquals(response, cache.peek(" RUMOURS ", "one"))
+        assertNull(cache.peek("Rumours", "two"))
+        clock = 180_000
+        assertNull(cache.peek("Rumours", "one"))
+    }
+    @Test fun cacheIsBoundedWithoutLeavingLocksBehind() = runBlocking {
+        val cache = ReleaseSearchCache()
+        val response = DiscogsSearchResponse(emptyList())
+        repeat(33) { cache.search("Album $it", "one") { response } }
+        assertNull(cache.peek("Album 0", "one"))
+        assertEquals(response, cache.peek("Album 32", "one"))
+        assertEquals(response, cache.search("Album 0", "one") { response })
     }
 }

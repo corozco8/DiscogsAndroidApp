@@ -33,8 +33,8 @@ internal fun marketplaceAccessStatus(
 /** Closing a challenge suppresses further automatic popups until access succeeds. */
 internal class MarketplaceVerificationGate {
     private var offered = false
-    fun shouldOpen(status: MarketplaceUiPriceStatus, automatic: Boolean, rateLimited: Boolean): Boolean {
-        if (rateLimited || status != MarketplaceUiPriceStatus.VERIFICATION_REQUIRED || (automatic && offered)) return false
+    fun shouldOpen(status: MarketplaceUiPriceStatus, automatic: Boolean): Boolean {
+        if (status != MarketplaceUiPriceStatus.VERIFICATION_REQUIRED || (automatic && offered)) return false
         offered = true
         return true
     }
@@ -44,8 +44,7 @@ internal class MarketplaceVerificationGate {
 data class ListingPricingInfo(
     val status: MarketplaceUiPriceStatus,
     val message: String,
-    val usingSavedPrices: Boolean = false,
-    val retryInSeconds: Long = 0
+    val usingSavedPrices: Boolean = false
 )
 
 internal fun listingPriceSource(isObserved: Boolean, isGradeEstimate: Boolean, usingSavedPrices: Boolean): String = when {

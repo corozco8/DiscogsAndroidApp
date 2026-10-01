@@ -25,6 +25,7 @@ object RetrofitClient {
                 ).build())
             }
             .addInterceptor(DiscogsRequestPacing())
+            .addNetworkInterceptor(DiscogsApiTrafficInterceptor())
             .build()
         return Retrofit.Builder()
             .baseUrl("https://api.discogs.com/")

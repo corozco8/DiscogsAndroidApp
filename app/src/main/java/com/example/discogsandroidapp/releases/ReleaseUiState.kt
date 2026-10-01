@@ -28,7 +28,8 @@ sealed interface ReleaseUiState {
         val message: String
     ) : ReleaseUiState
     object AiSearch : ReleaseUiState
-    data class StoreSuccess(val listings: List<InventoryListing>, val totalItems: Int, val isFetchingMore: Boolean, val syncMessage: String = "") : ReleaseUiState
+    data class StoreSuccess(val listings: List<InventoryListing>, val totalItems: Int, val isFetchingMore: Boolean,
+        val syncMessage: String = "", val isRefreshing: Boolean = false) : ReleaseUiState
     data class OrdersSuccess(
         val orders: List<DiscogsOrder>,
         val totalItems: Int,

@@ -15,46 +15,32 @@ class MarketplaceLoadPolicyTest {
         clock++
         assertTrue(policy.reserveLoad())
     }
-    @Test fun honorsServerPauseBeyondOneMinute() {
-        policy.limited("300")
-        clock += 180_000
-        assertEquals(120_000, policy.blockedFor())
+    @Test fun explicitRetryCanLoadImmediatelyDuringAutomaticSpacing() {
+        assertTrue(policy.reserveLoad())
+        assertEquals(10_000L, policy.waitForLoad())
+
+        assertTrue(policy.reserveLoad(explicit = true))
         assertFalse(policy.reserveLoad())
-        clock += 120_000
+        assertEquals(10_000L, policy.waitForLoad())
+    }
+    @Test fun repeatedExplicitRetriesNeverCreateALockout() {
+        assertTrue(policy.reserveLoad())
+        repeat(20) { assertTrue(policy.reserveLoad(explicit = true)) }
+
+        assertFalse(policy.reserveLoad())
+        clock += 10_000
         assertTrue(policy.reserveLoad())
     }
-    @Test fun repeatedLimitsBackOffWithoutExtendingTheTimerByReadingIt() {
-        policy.limited(null)
-        assertEquals(60_000, policy.blockedFor())
-        clock += 60_000
-        assertEquals(0, policy.blockedFor())
-        assertEquals(0, policy.blockedFor())
-        policy.limited(null)
-        assertEquals(120_000, policy.blockedFor())
-        clock += 120_000
-        policy.limited(null)
-        assertEquals(240_000, policy.blockedFor())
-    }
-    @Test fun restartingPreservesTheRemainingPause() {
-        val until = policy.limited(null)
-        clock += 20_000
-        val restored = MarketplaceLoadPolicy { clock }
-        restored.restore(until, policy.failures)
-        assertEquals(40_000, restored.blockedFor())
-        assertFalse(restored.reserveLoad())
-    }
-    @Test fun aSuccessfulPageResetsTheBackoff() {
-        policy.limited(null)
-        clock += 60_000
-        policy.limited(null)
-        policy.succeeded()
-        assertEquals(0, policy.blockedFor())
-        policy.limited(null)
-        assertEquals(60_000, policy.blockedFor())
-    }
-    @Test fun repeatedFailuresHaveABoundedFallbackPause() {
-        repeat(20) { policy.limited(null); clock = policy.blockedUntil }
-        policy.limited(null)
-        assertEquals(15 * 60_000L, policy.blockedFor())
+    @Test fun explicitLoadRestartsAutomaticSpacingFromItsOwnTime() {
+        assertTrue(policy.reserveLoad())
+        clock += 7_000
+        assertEquals(3_000L, policy.waitForLoad())
+
+        assertTrue(policy.reserveLoad(explicit = true))
+        assertEquals(10_000L, policy.waitForLoad())
+        clock += 9_999
+        assertFalse(policy.reserveLoad())
+        clock++
+        assertTrue(policy.reserveLoad())
     }
 }

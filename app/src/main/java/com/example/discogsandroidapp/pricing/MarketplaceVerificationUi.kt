@@ -51,6 +51,7 @@ internal fun MarketplaceVerificationDialog(pricing: MarketplacePricingController
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
     ) {
         Surface(modifier = Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Verify Discogs access", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
@@ -69,6 +70,10 @@ internal fun MarketplaceVerificationDialog(pricing: MarketplacePricingController
                     modifier = Modifier.padding(16.dp)
                 )
             }
+            com.example.discogsandroidapp.ui.shared.ApiRequestCounter(
+                Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(top = 2.dp, end = 6.dp)
+            )
+            }
         }
     }
 }
@@ -80,11 +85,11 @@ internal fun ListingPricingNotice(
     onVerify: (() -> Unit)?,
     onRefresh: (() -> Unit)?
 ) {
-    if (info == null || info.status in setOf(MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED)) return
+    if (info == null || info.status in setOf(MarketplaceUiPriceStatus.IDLE, MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED)) return
     val notice = when (info.status) {
         MarketplaceUiPriceStatus.LOADING -> "Checking live prices…"
         MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> "Discogs verification required"
-        MarketplaceUiPriceStatus.RATE_LIMITED -> "Marketplace requests paused"
+        MarketplaceUiPriceStatus.RATE_LIMITED -> "Discogs: too many requests"
         MarketplaceUiPriceStatus.NETWORK -> "Live pricing offline"
         MarketplaceUiPriceStatus.TIMEOUT -> "Live pricing timed out"
         MarketplaceUiPriceStatus.NO_MATCH -> "No matching live prices"
@@ -99,8 +104,8 @@ internal fun ListingPricingNotice(
         if (info.status == MarketplaceUiPriceStatus.VERIFICATION_REQUIRED && onVerify != null) {
             TextButton(onClick = onVerify, enabled = enabled) { Text("Verify Discogs") }
         } else if (info.status != MarketplaceUiPriceStatus.LOADING && onRefresh != null) {
-            TextButton(onClick = onRefresh, enabled = enabled && info.retryInSeconds == 0L) {
-                Text(if (info.retryInSeconds > 0) "Retry in ${info.retryInSeconds}s" else "Refresh prices")
+            TextButton(onClick = onRefresh, enabled = enabled) {
+                Text("Refresh prices")
             }
         }
     }
@@ -114,9 +119,8 @@ internal fun MarketplacePricingUnavailable(pricing: MarketplacePricingController
         if (pricing.status == MarketplaceUiPriceStatus.LOADING) {
             CircularProgressIndicator(modifier = Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
         }
-        TextButton(onClick = pricing::refresh, enabled = pricing.retryInSeconds == 0L &&
-            pricing.status != MarketplaceUiPriceStatus.LOADING) {
-            Text(if (pricing.retryInSeconds > 0) "Retry in ${pricing.retryInSeconds}s" else "Open listings")
+        TextButton(onClick = pricing::refresh, enabled = pricing.status != MarketplaceUiPriceStatus.LOADING) {
+            Text("Open listings")
         }
     }
 }

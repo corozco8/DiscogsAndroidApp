@@ -101,7 +101,6 @@ interface DiscogsApiService {
         @Path("username") username: String,
         @Header("Authorization") authHeader: String,
         @Query("status") status: String = "For Sale",
-        @Query("string") searchString: String? = null,
         @Query("sort") sort: String = "listed",
         @Query("sort_order") sortOrder: String = "desc",
         @Query("page") page: Int = 1,

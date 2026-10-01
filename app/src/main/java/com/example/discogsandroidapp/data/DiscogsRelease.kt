@@ -89,6 +89,17 @@ data class PriceSuggestions(
 
 private const val MIN_TRUSTED_LIVE_LISTINGS = 2
 
+/** Median of the comparable asks in the retrieved sample, not the whole marketplace. */
+internal fun medianComparableAskingPrice(
+    prices: List<Double>,
+    minimumListingCount: Int = MIN_TRUSTED_LIVE_LISTINGS
+): Double? {
+    val valid = prices.filter { it.isFinite() && it > 0.0 }.sorted()
+    if (valid.size < minimumListingCount) return null
+    val middle = valid.size / 2
+    return if (valid.size % 2 == 1) valid[middle] else valid[middle - 1] / 2.0 + valid[middle] / 2.0
+}
+
 data class ReleasePriceSummary(
     val low: Double? = null,
     val median: Double? = null,
@@ -117,6 +128,8 @@ data class ReleasePriceSummary(
 
     // Number of USD marketplace rows seen for each exact media+sleeve pair.
     val activeMediaSleeveListingCounts: Map<String, Int> = emptyMap(),
+    val activeMediaPriceSamples: Map<String, List<Double>> = emptyMap(),
+    val activeMediaSleevePriceSamples: Map<String, List<Double>> = emptyMap(),
 
     // Discogs release format: only an explicitly tagged Album uses our
     // sleeve-quality exclusions. DJ singles / 12-inch singles / EPs may
@@ -124,7 +137,7 @@ data class ReleasePriceSummary(
     val isAlbumRelease: Boolean = true
 ) {
     /**
-     * Lowest live asking price for the selected media grade.
+     * Median comparable asking price for the selected media grade in our first-page sample.
      *
      * Normal recommendation rules:
      * - M / NM: ignore marketplace copies with G+ or worse sleeves.
@@ -133,7 +146,7 @@ data class ReleasePriceSummary(
      *
      * If the seller intentionally selects a sleeve that would normally be
      * rejected (for example NM media with an F sleeve), the special filter is
-     * disabled for that task and the raw lowest price for the media grade is
+     * disabled for that task and comparable asks for the media grade are
      * used instead.
      */
     fun currentListingPriceFor(
@@ -149,7 +162,8 @@ data class ReleasePriceSummary(
     private fun conflictsWithHigherGrade(
         condition: String,
         sleeveCondition: String?,
-        price: Double
+        price: Double,
+        minimumListingCount: Int = MIN_TRUSTED_LIVE_LISTINGS
     ): Boolean {
         val rank = conditionRank(condition) ?: return false
         val grades = listOf(
@@ -157,7 +171,7 @@ data class ReleasePriceSummary(
             "Very Good (VG)", "Very Good Plus (VG+)", "Near Mint (NM or M-)", "Mint (M)"
         )
         return grades.drop(rank + 1).any { higherGrade ->
-            val higherPrice = comparableListingPriceFor(higherGrade, condition, sleeveCondition)
+            val higherPrice = comparableListingPriceFor(higherGrade, condition, sleeveCondition, minimumListingCount)
             higherPrice != null && price >= roundPrice(higherPrice * 0.90)
         }
     }
@@ -166,23 +180,32 @@ data class ReleasePriceSummary(
     private fun comparableListingPriceFor(
         condition: String,
         targetCondition: String,
-        sleeveCondition: String?
+        sleeveCondition: String?,
+        minimumListingCount: Int = MIN_TRUSTED_LIVE_LISTINGS
     ): Double? {
         val minimumSleeveRank =
             minimumRecommendedSleeveRankFor(targetCondition)
 
         fun rawMediaPrice(): Double? {
+            if (!sleeveCondition.isNullOrBlank()) {
+                activeMediaSleevePriceSamples["$condition||$sleeveCondition"]?.let { samples ->
+                    medianComparableAskingPrice(samples, minimumListingCount)?.let { return roundPrice(it) }
+                }
+            }
+            activeMediaPriceSamples[condition]?.let { samples ->
+                return medianComparableAskingPrice(samples, minimumListingCount)?.let(::roundPrice)
+            }
             val comparableCount = activeMediaListingCounts[condition] ?: 0
-            if (comparableCount < MIN_TRUSTED_LIVE_LISTINGS) return null
+            if (comparableCount < minimumListingCount) return null
 
             return activeMediaLowestPrices[condition]
                 ?.takeIf { it.isFinite() && it > 0.0 }
                 ?.let(::roundPrice)
         }
 
-        // Non-albums are compared on media grade alone. The Discogs format
-        // designation, not record size or RPM, controls this exception.
-        // Keep the two-comparable USD minimum and existing fallback behavior.
+        // Non-albums do not exclude low-grade or generic sleeves. Exact sleeve
+        // samples are still preferred when present; otherwise use the media grade.
+        // The caller controls the comparable count; observed prices still require two.
         if (!isAlbumRelease || minimumSleeveRank == null) {
             return rawMediaPrice()
         }
@@ -204,6 +227,16 @@ data class ReleasePriceSummary(
         }
 
         val prefix = "$condition||"
+        val exactKey = "$condition||$sleeveCondition"
+        if (!sleeveCondition.isNullOrBlank()) {
+            activeMediaSleevePriceSamples[exactKey]?.let { samples ->
+                medianComparableAskingPrice(samples, minimumListingCount)?.let { return roundPrice(it) }
+            }
+        }
+        val qualifyingSamples = activeMediaSleevePriceSamples.filterKeys { key ->
+            key.startsWith(prefix) && (sleeveGradeRank(key.removePrefix(prefix)) ?: -1) >= minimumSleeveRank
+        }.values.flatten()
+        if (qualifyingSamples.isNotEmpty()) return medianComparableAskingPrice(qualifyingSamples, minimumListingCount)?.let(::roundPrice)
         var qualifyingCount = 0
         var lowestQualifyingPrice: Double? = null
 
@@ -221,7 +254,7 @@ data class ReleasePriceSummary(
             }
         }
 
-        if (qualifyingCount < MIN_TRUSTED_LIVE_LISTINGS) return null
+        if (qualifyingCount < minimumListingCount) return null
 
         return lowestQualifyingPrice?.let(::roundPrice)
     }
@@ -250,99 +283,65 @@ data class ReleasePriceSummary(
         val ratios = listOf(1.0, 0.60, 0.36)
         val target = grades.indexOf(condition)
         if (target < 0 || currentListingPriceFor(condition, sleeveCondition) != null) return null
+        // Prefer evidence from at least two listings. Only when none exists do we
+        // accept a single qualifying listing, still returned as an estimate.
+        val minimumListingCount = if (grades.any { grade ->
+                comparableListingPriceFor(grade, condition, sleeveCondition) != null
+            }) MIN_TRUSTED_LIVE_LISTINGS else 1
+        if (minimumListingCount == 1) {
+            comparableListingPriceFor(condition, condition, sleeveCondition, 1)?.let { price ->
+                if (conflictsWithHigherGrade(condition, sleeveCondition, price, 1)) return null
+                return LiveGradeEstimate(price, condition, price)
+            }
+        }
+        // Fill a missing grade between available asks, using the same target sleeve policy.
+        val better = (target - 1 downTo 0).firstNotNullOfOrNull { index ->
+            comparableListingPriceFor(grades[index], condition, sleeveCondition, minimumListingCount)?.let { Triple(index, grades[index], it) }
+        }
+        val worse = (target + 1 until grades.size).firstNotNullOfOrNull { index ->
+            comparableListingPriceFor(grades[index], condition, sleeveCondition, minimumListingCount)?.let { Triple(index, grades[index], it) }
+        }
+        if (better != null && worse != null) {
+            if (better.third <= worse.third) return null
+            val fraction = (target - better.first).toDouble() / (worse.first - better.first)
+            val estimate = roundPrice(better.third * (1.0 - fraction) + worse.third * fraction)
+            if (conflictsWithHigherGrade(condition, sleeveCondition, estimate, minimumListingCount)) return null
+            return LiveGradeEstimate(estimate, better.second, better.third, worse.second, worse.third)
+        }
         // Closest grade first; prefer the better grade when equally close.
         for (source in grades.indices.filter { it != target }.sortedBy { kotlin.math.abs(it - target) }) {
-            val sourcePrice = comparableListingPriceFor(grades[source], condition, sleeveCondition) ?: continue
+            val sourcePrice = comparableListingPriceFor(grades[source], condition, sleeveCondition, minimumListingCount) ?: continue
             val estimate = roundPrice(sourcePrice * ratios[target] / ratios[source])
             if (!estimate.isFinite() || estimate <= 0.0) continue
-            if (conflictsWithHigherGrade(condition, sleeveCondition, estimate)) return null
+            if (conflictsWithHigherGrade(condition, sleeveCondition, estimate, minimumListingCount)) return null
             return LiveGradeEstimate(estimate, grades[source], sourcePrice)
         }
         return null
     }
 
-    /**
-     * The app's original seller-pricing algorithm. This is the silent
-     * fallback whenever a live marketplace price cannot be obtained.
-     */
+    /** Grade-specific API estimate with a small, explicit sleeve adjustment. */
     fun fallbackRecommendedPriceFor(
         condition: String,
         sleeveCondition: String? = null
     ): Double? {
-        val vgPlusAnchor =
-            originalRecommendationFor(
-                "Very Good Plus (VG+)"
-            )
-
-        if (
-            vgPlusAnchor != null &&
-            vgPlusAnchor > 0.0
-        ) {
-            when (condition) {
-                "Very Good Plus (VG+)" -> {
-                    val multiplier =
-                        if (
-                            sleeveCondition ==
-                            "Very Good Plus (VG+)" ||
-                            sleeveCondition ==
-                            "Near Mint (NM or M-)" ||
-                            sleeveCondition ==
-                            "Mint (M)"
-                        ) {
-                            1.15
-                        } else {
-                            1.0
-                        }
-
-                    return roundPrice(
-                        vgPlusAnchor * multiplier
-                    )
-                }
-
-                "Near Mint (NM or M-)" -> {
-                    val multiplier =
-                        if (
-                            sleeveCondition ==
-                            "Near Mint (NM or M-)" ||
-                            sleeveCondition ==
-                            "Mint (M)"
-                        ) {
-                            2.5
-                        } else {
-                            2.0
-                        }
-
-                    return roundPrice(
-                        vgPlusAnchor * multiplier
-                    )
-                }
-
-                "Mint (M)" -> {
-                    val multiplier =
-                        if (
-                            sleeveCondition ==
-                            "Mint (M)"
-                        ) {
-                            5.0
-                        } else {
-                            4.0
-                        }
-
-                    return roundPrice(
-                        vgPlusAnchor * multiplier
-                    )
-                }
-            }
+        val gradePrice = apiRecommendationFor(condition) ?: return null
+        // Seller heuristic: VG+ sleeve is neutral; avoid the old 2x–5x grade multipliers.
+        val sleeveMultiplier = if (!isAlbumRelease) 1.0 else when (sleeveCondition) {
+            "Mint (M)" -> 1.10
+            "Near Mint (NM or M-)" -> 1.05
+            "Very Good (VG)" -> 0.95
+            "Good Plus (G+)" -> 0.90
+            "Good (G)" -> 0.85
+            "Fair (F)" -> 0.80
+            "Poor (P)", "No Cover" -> 0.75
+            else -> 1.0
         }
-
-        return originalRecommendationFor(
-            condition
-        )
+        return roundPrice(gradePrice * sleeveMultiplier).takeIf { it.isFinite() && it > 0.0 }
     }
 
     /**
      * Prefer matching listings, then an estimate from another live grade,
-     * then the original seller-pricing algorithm.
+     * then the grade-specific API estimate.
      */
     fun recommendedPriceFor(
         condition: String,
@@ -425,72 +424,26 @@ data class ReleasePriceSummary(
     }
 
 
-    private fun originalRecommendationFor(
-        condition: String
-    ): Double? {
-        val suggestions = priceSuggestions ?: return null
+    private fun apiRecommendationFor(condition: String): Double? {
         val targetRank = conditionRank(condition) ?: return null
-        val points = suggestions.conditionPricePoints()
-
-        val directPrice =
-            suggestions
-                .forCondition(condition)
-                ?.value
-                ?.takeIf { it.isFinite() && it > 0.0 }
-
-        // When the exact grade is absent, estimate it from the neighboring
-        // Discogs condition suggestions instead of abandoning the fallback.
-        val curvePrice =
-            predictConditionPrice(
-                points = points,
-                targetRank = targetRank
-            )
-                ?.takeIf { it.isFinite() && it > 0.0 }
-
-        val historicalEstimate =
-            when {
-                directPrice != null && curvePrice != null -> {
-                    val ratio = directPrice / curvePrice
-                    val directWeight =
-                        if (ratio < 0.55 || ratio > 1.80) 0.35 else 0.75
-
-                    geometricBlend(
-                        first = directPrice,
-                        second = curvePrice,
-                        firstWeight = directWeight
-                    )
-                }
-
-                directPrice != null -> directPrice
-                curvePrice != null -> curvePrice
-                else -> return null
-            }
-
-        val currentLow = lowestAskingPrice?.takeIf { it.isFinite() && it > 0.0 }
-        if (currentLow == null) return roundPrice(historicalEstimate)
-
-        val marketWeight =
-            when {
-                numForSale >= 25 -> 0.55
-                numForSale >= 10 -> 0.50
-                numForSale >= 5 -> 0.40
-                numForSale >= 2 -> 0.30
-                else -> 0.20
-            }
-
-        val boundedMarketLow =
-            currentLow.coerceIn(
-                historicalEstimate * 0.10,
-                historicalEstimate * 3.00
-            )
-
-        return roundPrice(
-            geometricBlend(
-                first = historicalEstimate,
-                second = boundedMarketLow,
-                firstWeight = 1.0 - marketWeight
-            )
-        )
+        // All listing inputs are USD. Never silently interpret another currency as dollars.
+        if (!currency.equals("USD", ignoreCase = true)) return null
+        val points = priceSuggestions?.conditionPricePoints().orEmpty()
+        points.firstOrNull { it.first == targetRank }?.let { return roundPrice(it.second) }
+        val lower = points.lastOrNull { it.first < targetRank }
+        val upper = points.firstOrNull { it.first > targetRank }
+        val estimate = if (lower != null && upper != null) {
+            if (upper.second < lower.second) return null
+            val fraction = (targetRank - lower.first).toDouble() / (upper.first - lower.first)
+            lower.second * (1.0 - fraction) + upper.second * fraction
+        } else {
+            // With only one side available, retain the existing 60% per grade-step heuristic.
+            // A price-guide median is used only if there are no valid condition suggestions.
+            val anchor = lower ?: upper ?: median?.takeIf { it.isFinite() && it > 0.0 }
+                ?.let { 5 to it } ?: return null
+            anchor.second * Math.pow(0.60, (anchor.first - targetRank).toDouble())
+        }
+        return roundPrice(estimate).takeIf { it.isFinite() && it > 0.0 }
     }
 
     private fun conditionRank(
@@ -509,123 +462,13 @@ data class ReleasePriceSummary(
         }
     }
 
-    private fun PriceSuggestions.conditionPricePoints():
-            List<Pair<Int, Double>> {
-
-        return listOfNotNull(
-            poor?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 0 to it },
-
-            fair?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 1 to it },
-
-            good?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 2 to it },
-
-            goodPlus?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 3 to it },
-
-            veryGood?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 4 to it },
-
-            veryGoodPlus?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 5 to it },
-
-            nearMint?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 6 to it },
-
-            mint?.value
-                ?.takeIf { it > 0.0 }
-                ?.let { 7 to it }
-        )
-    }
-
-    /**
-     * Fits a simple straight line to log(price) across all available
-     * condition grades. Predicting in log space makes the curve resistant
-     * to the huge dollar spreads common with collectible records.
-     */
-    private fun predictConditionPrice(
-        points: List<Pair<Int, Double>>,
-        targetRank: Int
-    ): Double? {
-        if (points.size < 2) {
-            return null
-        }
-
-        val xs =
-            points.map { it.first.toDouble() }
-
-        val ys =
-            points.map {
-                kotlin.math.ln(
-                    it.second
-                )
+    private fun PriceSuggestions.conditionPricePoints(): List<Pair<Int, Double>> {
+        return listOf(poor, fair, good, goodPlus, veryGood, veryGoodPlus, nearMint, mint)
+            .mapIndexedNotNull { rank, suggestion ->
+                val amount = suggestion?.value?.takeIf { it.isFinite() && it > 0.0 }
+                val isUsd = suggestion?.currency?.equals("USD", ignoreCase = true) ?: true
+                if (amount != null && isUsd) rank to amount else null
             }
-
-        val meanX =
-            xs.average()
-
-        val meanY =
-            ys.average()
-
-        var numerator = 0.0
-        var denominator = 0.0
-
-        for (index in xs.indices) {
-            val dx =
-                xs[index] - meanX
-
-            numerator +=
-                dx * (ys[index] - meanY)
-
-            denominator +=
-                dx * dx
-        }
-
-        if (denominator == 0.0) {
-            return null
-        }
-
-        val slope =
-            numerator / denominator
-
-        val intercept =
-            meanY - slope * meanX
-
-        return kotlin.math.exp(
-            intercept +
-                    slope * targetRank.toDouble()
-        )
-    }
-
-    private fun geometricBlend(
-        first: Double,
-        second: Double,
-        firstWeight: Double
-    ): Double {
-        val safeWeight =
-            firstWeight.coerceIn(
-                0.0,
-                1.0
-            )
-
-        val secondWeight =
-            1.0 - safeWeight
-
-        return kotlin.math.exp(
-            safeWeight *
-                    kotlin.math.ln(first) +
-                    secondWeight *
-                    kotlin.math.ln(second)
-        )
     }
 
     private fun roundPrice(
@@ -967,12 +810,11 @@ data class EvaluationUser(
 )
 
 
-/** USD estimate from observed listings of the same release; shipping excluded.
- * Ratios follow the vinyl guidance at:
- * https://support.discogs.com/hc/en-us/articles/360001566193-How-To-Grade-Items
- */
+/** USD estimate from observed asking prices, using nearby grades; shipping excluded. */
 data class LiveGradeEstimate(
     val price: Double,
     val sourceCondition: String,
-    val sourcePrice: Double
+    val sourcePrice: Double,
+    val secondSourceCondition: String? = null,
+    val secondSourcePrice: Double? = null
 )

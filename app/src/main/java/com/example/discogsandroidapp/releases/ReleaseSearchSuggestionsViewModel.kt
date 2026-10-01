@@ -19,6 +19,7 @@ internal data class ReleaseSuggestionsState(
 
 internal class ReleaseSearchSuggestionsViewModel @JvmOverloads constructor(
     application: Application,
+    private val cachedResults: (String, String) -> DiscogsSearchResponse? = ReleaseSearchRepository::peek,
     private val searchReleases: suspend (String, String) -> DiscogsSearchResponse = ReleaseSearchRepository::search
 ) : AndroidViewModel(application) {
     private val mutableState = MutableStateFlow(ReleaseSuggestionsState())
@@ -39,13 +40,17 @@ internal class ReleaseSearchSuggestionsViewModel @JvmOverloads constructor(
         val generation = ++requestGeneration
         mutableState.value = ReleaseSuggestionsState(query)
         if (!active || normalizedSearchQuery(query).length < 2) return
+        cachedResults(query, token)?.let { response ->
+            mutableState.value = ReleaseSuggestionsState(query, results = response.suggestionResults())
+            return
+        }
         job = viewModelScope.launch {
             delay(650)
             mutableState.value = ReleaseSuggestionsState(query, loading = true)
             try {
                 val response = searchReleases(query, token)
                 if (generation == requestGeneration) mutableState.value = ReleaseSuggestionsState(
-                    query, results = response.results.filter { it.type == "release" }.distinctBy { it.id }.take(8)
+                    query, results = response.suggestionResults()
                 )
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) {
@@ -55,6 +60,7 @@ internal class ReleaseSearchSuggestionsViewModel @JvmOverloads constructor(
             }
         }
     }
+    private fun DiscogsSearchResponse.suggestionResults() = results.filter { it.type == "release" }.distinctBy { it.id }.take(8)
     fun selected(result: SearchResult) = viewModelScope.launch {
         ReleaseSearchHistory.remember(getApplication(), release = result)
     }

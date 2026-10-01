@@ -5,6 +5,7 @@ import com.example.discogsandroidapp.data.Price
 import com.example.discogsandroidapp.data.ReleasePriceSummary
 import com.example.discogsandroidapp.data.isAlbumFormat
 import com.example.discogsandroidapp.inventory.getShortGrade
+import com.example.discogsandroidapp.inventory.listingDescriptionForGrade
 import com.example.discogsandroidapp.pricing.ListingPricingInfo
 import com.example.discogsandroidapp.pricing.ListingPricingNotice
 import com.example.discogsandroidapp.pricing.MarketplacePricingWebView
@@ -50,6 +51,7 @@ import android.util.Log
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.KeyboardCapitalization
 
 private const val TAG = "ReleaseDetails"
 
@@ -81,6 +83,9 @@ internal fun ReleaseDetails(
     var isRefreshing by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
+    LaunchedEffect(showSellDialog, pricing.ready) {
+        if (showSellDialog) pricing.requestSellPrices()
+    }
     LaunchedEffect(showSellDialog, isSubmittingListing, pricing.status) {
         if (showSellDialog && !isSubmittingListing) pricing.openVerification(automatic = true)
     }
@@ -148,9 +153,8 @@ internal fun ReleaseDetails(
             onRefresh = {
                 isRefreshing = true
                 if (onRefresh != null) {
-                    pricing.refreshOnNextVisit()
                     onRefresh.invoke()
-                } else {
+                } else if (showSellDialog) {
                     pricing.refresh()
                 }
 
@@ -272,11 +276,9 @@ internal fun ReleaseDetails(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Keep the algorithm guide visible while the first live page loads.
+                // This browsing guide uses API pricing only, independent of live marketplace data.
                 SalesRangeCard(
                     summary = priceSummary ?: ReleasePriceSummary(),
-                    livePrices = pricing.prices?.firstPagePrices.orEmpty(),
-                    pricingInfo = pricing.listingInfo,
                     haveCount = release.community?.have ?: 0,
                     wantCount = release.community?.want ?: 0,
                     onListingsClick = { release.id?.let { onViewListingsClick(it) } }
@@ -746,6 +748,7 @@ fun AddListingDialog(
                                 contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
                                     .clickable(enabled = !isSubmitting) {
+                                        comments = listingDescriptionForGrade(comments, fullGrade)
                                         condition = fullGrade
                                         conditionError = false
                                     }
@@ -938,6 +941,7 @@ fun AddListingDialog(
                     value = comments,
                     onValueChange = { comments = it },
                     label = { Text("Description / Comments") },
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     maxLines = 3,
                     enabled = !isSubmitting,
                     modifier = Modifier.keyboardInputArea().fillMaxWidth()

@@ -1,6 +1,9 @@
 package com.example.discogsandroidapp.releases
 
 import com.example.discogsandroidapp.data.Price
+import com.example.discogsandroidapp.data.InventoryListing
+import com.example.discogsandroidapp.data.ListingRelease
+import com.example.discogsandroidapp.inventory.EditListingDialog
 import com.example.discogsandroidapp.data.ReleasePriceSummary
 import com.example.discogsandroidapp.pricing.ListingPricingInfo
 import com.example.discogsandroidapp.pricing.MarketplaceUiPriceStatus
@@ -23,7 +26,9 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -31,6 +36,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -43,6 +50,73 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ListingDialogInteractionTest {
+    private val mintDescription = "This is a sealed record, cannot be returned once opened. Sold as a factory sealed collectible"
+    private val nearMintDescription = "A nearly perfect record with no obvious signs of wear"
+
+    @Test fun mediaPresetsAreEditableAndSleeveChangesDoNotReplaceThem() {
+        var savedDescription: String? = null
+        compose.setContent {
+            MaterialTheme {
+                AddListingDialog(onDismiss = {}, onSave = { _, _, _, comments -> savedDescription = comments })
+            }
+        }
+        val description = compose.onNode(hasSetTextAction() and hasText("Description / Comments"))
+        compose.onAllNodesWithText("M")[0].performClick()
+        description.assertTextContains(mintDescription)
+        compose.onAllNodesWithText("NM")[1].performClick()
+        description.assertTextContains(mintDescription)
+        compose.onAllNodesWithText("NM")[0].performClick()
+        description.assertTextContains(nearMintDescription)
+        val addition = ". Includes original inner sleeve."
+        description.performScrollTo().performClick().performTextInputSelection(TextRange(nearMintDescription.length))
+        description.performTextInput(addition)
+        compose.onAllNodesWithText("VG")[0].performScrollTo().performClick()
+        description.assertTextContains(nearMintDescription + addition)
+        compose.onNode(hasSetTextAction() and hasText("Price (USD)")).performScrollTo().performTextInput("12.50")
+        compose.onNodeWithText("Save").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(nearMintDescription + addition, savedDescription) }
+    }
+
+    @Test fun editingABlankDescriptionUsesTheSelectedMediaPreset() {
+        var savedDescription: String? = null
+        compose.setContent {
+            MaterialTheme {
+                EditListingDialog(
+                    listing = InventoryListing(123, "For Sale", "Very Good (VG)", comments = "",
+                        price = Price(12.50, "USD"), release = ListingRelease(id = 456)),
+                    onDismiss = {}, onSave = { _, _, _, comments -> savedDescription = comments }
+                )
+            }
+        }
+        val description = compose.onNode(hasSetTextAction() and hasText("Description / Comments"))
+        compose.onAllNodesWithText("M")[0].performClick()
+        description.assertTextContains(mintDescription)
+        compose.onAllNodesWithText("NM")[0].performClick()
+        description.assertTextContains(nearMintDescription)
+        compose.onAllNodesWithText("VG")[0].performClick()
+        assertEquals("", description.fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        compose.onAllNodesWithText("M")[0].performClick()
+        compose.onNodeWithText("Save Changes").performClick()
+        compose.runOnIdle { assertEquals(mintDescription, savedDescription) }
+    }
+
+    @Test fun editingMediaGradePreservesAnExistingSellerDescription() {
+        var savedDescription: String? = null
+        compose.setContent {
+            MaterialTheme {
+                EditListingDialog(
+                    listing = InventoryListing(123, "For Sale", "Very Good (VG)", comments = "Original seller notes",
+                        price = Price(12.50, "USD"), release = ListingRelease(id = 456)),
+                    onDismiss = {}, onSave = { _, _, _, comments -> savedDescription = comments }
+                )
+            }
+        }
+        compose.onAllNodesWithText("M")[0].performClick()
+        compose.onAllNodesWithText("NM")[0].performClick()
+        compose.onNode(hasSetTextAction() and hasText("Description / Comments")).assertTextContains("Original seller notes")
+        compose.onNodeWithText("Save Changes").performClick()
+        compose.runOnIdle { assertEquals("Original seller notes", savedDescription) }
+    }
     @get:Rule val compose = createComposeRule()
 
     @Before fun resetBridge() {
@@ -187,6 +261,29 @@ class ListingDialogInteractionTest {
         compose.onNodeWithText("12.50").assertExists()
         compose.onNodeWithText("Save").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(1, saves) }
+    }
+
+    @Test fun singleListingEstimateIsLabeledAndCanBeAppliedWithoutOverwritingTheDraft() {
+        val summary = ReleasePriceSummary(
+            activeMediaPriceSamples = mapOf("Very Good (VG)" to listOf(10.0)),
+            activeMediaSleevePriceSamples = mapOf("Very Good (VG)||Very Good Plus (VG+)" to listOf(10.0)))
+        compose.setContent {
+            MaterialTheme {
+                AddListingDialog(priceSummary = summary,
+                    pricingInfo = ListingPricingInfo(MarketplaceUiPriceStatus.FRESH, "Prices checked now"),
+                    onDismiss = {}, onSave = { _, _, _, _ -> })
+            }
+        }
+        val price = compose.onNode(hasSetTextAction() and hasText("Price (USD)"))
+        price.performTextInput("12.50")
+        compose.onAllNodesWithText("NM")[0].performClick()
+        compose.onNodeWithText("Estimated NM: USD 27.78").assertIsDisplayed()
+        price.assertTextContains("12.50")
+        compose.onNodeWithText("Use").performClick()
+        price.assertTextContains("27.78")
+        compose.onAllNodesWithText("VG+")[0].performClick()
+        compose.onNodeWithText("Estimated VG+: USD 16.67").assertIsDisplayed()
+        price.assertTextContains("27.78")
     }
 
     @Test fun guideUpdatesFromAlgorithmToFirstPageAverage() {

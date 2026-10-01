@@ -5,9 +5,6 @@ import com.example.discogsandroidapp.data.ListingRelease
 import com.example.discogsandroidapp.data.LocalInventoryListingEntity
 import com.example.discogsandroidapp.data.Price
 import com.example.discogsandroidapp.data.SellerLocalRepository
-import com.example.discogsandroidapp.releases.search
-
-import android.content.Context
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -16,6 +13,8 @@ internal data class LocalStoreState(
     val ready: Boolean = false,
     val query: StoreQuery = StoreQuery(),
     val listings: List<InventoryListing> = emptyList(),
+    val totalItems: Int = 0,
+    val isRefreshing: Boolean = false,
     val message: String = "Loading saved inventory…",
     val error: String? = null
 )
@@ -26,6 +25,7 @@ internal class StoreSearchIndex(inventory: List<LocalInventoryListingEntity>) {
         row to listOf(row.listingId, row.releaseId, row.artist, row.title, row.comments,
             row.mediaCondition, row.sleeveCondition, row.priceValue).joinToString(" ").lowercase(java.util.Locale.ROOT)
     }
+    val size: Int get() = entries.size
     fun search(query: StoreQuery): List<InventoryListing> {
         val terms = query.text.trim().lowercase(java.util.Locale.ROOT).split(Regex("\\s+")).filter { it.isNotEmpty() }
         val matches = entries.asSequence().filter { (_, text) -> terms.all { it in text } }.map { it.first }.toList()
@@ -47,7 +47,6 @@ internal class StoreSearchIndex(inventory: List<LocalInventoryListingEntity>) {
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 internal class StoreInventoryController(
-    context: Context,
     private val repository: SellerLocalRepository,
     private val scope: CoroutineScope
 ) {
@@ -64,12 +63,14 @@ internal class StoreInventoryController(
             ready = sync != null,
             query = query,
             listings = index.search(query),
+            totalItems = index.size,
+            isRefreshing = refreshing,
             message = when {
-                error != null -> "Showing saved inventory. Refresh failed; tap Refresh to retry."
-                refreshing -> "Refreshing inventory…"
+                error != null -> "Showing saved inventory. Refresh failed; retry from the menu."
+                refreshing -> if (sync == null) "Downloading inventory…" else "Refreshing inventory…"
                 sync != null -> "Saved inventory • updated " + java.text.DateFormat.getDateTimeInstance(
                     java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(sync.lastSuccessfulSyncAtEpochMs))
-                else -> "Loading inventory for the first time…"
+                else -> "Downloading inventory…"
             },
             error = error
         )

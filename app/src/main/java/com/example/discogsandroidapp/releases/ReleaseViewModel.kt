@@ -12,6 +12,9 @@ import com.example.discogsandroidapp.data.SellerLocalRepository
 import com.example.discogsandroidapp.inventory.ListingCreationResult
 import com.example.discogsandroidapp.inventory.createAndVerifyListing
 import com.example.discogsandroidapp.inventory.userMessage
+import com.example.discogsandroidapp.inventory.StoreInventoryController
+import com.example.discogsandroidapp.inventory.StoreQuery
+import com.example.discogsandroidapp.inventory.LocalStoreState
 import com.example.discogsandroidapp.network.BackendRetrofitClient
 import com.example.discogsandroidapp.network.CreateListingRequest
 import com.example.discogsandroidapp.network.EditListingRequest
@@ -84,6 +87,8 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         navigationRequestGeneration++
         navigationRequestJob?.cancel()
         navigationRequestJob = null
+        storeObservationJob?.cancel()
+        storeObservationJob = null
     }
 
 
@@ -371,74 +376,51 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
     }
 
     private val localRepository = SellerLocalRepository(getApplication())
-    private val currentListings = mutableListOf<InventoryListing>()
+    private val storeController = StoreInventoryController(localRepository, viewModelScope)
+    private var storeObservationJob: Job? = null
     private var currentSort = "listed"
     private var currentSortOrder = "desc"
     private var currentStoreQuery = ""
     private var storeToken = ""
-    private var storePage = 0
-    private var storePages = 1
-    private var storeTotal = 0
-    private var storeFetching = false
-    private var storeRequestGeneration = 0
-    private var storeFetchJob: kotlinx.coroutines.Job? = null
 
-    fun fetchStoreInventory(token: String, sort: String = "listed", sortOrder: String = "desc", reset: Boolean = true) {
-        if (!reset && (storeFetching || storePage >= storePages)) return
-        if (reset) {
-            invalidateNavigationRequests()
-            storeRequestGeneration++
-            storeFetchJob?.cancel()
-            currentListings.clear()
-            storePage = 0
-            storePages = 1
-            storeTotal = 0
-            _uiState.value = ReleaseUiState.StoreLoading
-        }
+    fun fetchStoreInventory(token: String, sort: String = "listed", sortOrder: String = "desc") {
+        invalidateNavigationRequests()
         storeToken = token
         currentSort = sort
         currentSortOrder = sortOrder
-        val generation = storeRequestGeneration
         val navigation = navigationRequestGeneration
-        val requestedQuery = currentStoreQuery
-        val nextPage = storePage + 1
-        storeFetching = true
-        if (!reset) _uiState.value = ReleaseUiState.StoreSuccess(currentListings.toList(), storeTotal, true)
-        storeFetchJob = viewModelScope.launch {
-            try {
-                val username = currentUsername.takeIf { it.isNotBlank() }
-                    ?: RetrofitClient.apiService.getIdentity("Discogs token=$token").username.also { currentUsername = it }
-                val response = RetrofitClient.apiService.getInventory(
-                    username = username, authHeader = "Discogs token=$token", status = "For Sale",
-                    searchString = requestedQuery.takeIf { it.isNotBlank() }, sort = sort, sortOrder = sortOrder,
-                    page = nextPage, perPage = 100
-                )
-                if (generation != storeRequestGeneration || navigation != navigationRequestGeneration) return@launch
-                if (_uiState.value !is ReleaseUiState.StoreLoading && _uiState.value !is ReleaseUiState.StoreSuccess) return@launch
-                val ids = currentListings.map { it.id }.toMutableSet()
-                currentListings.addAll(response.listings.filter { ids.add(it.id) })
-                storePage = nextPage
-                storePages = response.pagination.pages.coerceAtLeast(1)
-                storeTotal = response.pagination.items
-                _uiState.value = ReleaseUiState.StoreSuccess(currentListings.toList(), storeTotal, false)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (generation == storeRequestGeneration && navigation == navigationRequestGeneration) {
-                    _uiState.value = ReleaseUiState.Error("Could not load live inventory. Please retry. " + (e.message ?: ""))
+        val requested = StoreQuery(currentStoreQuery, sort, sortOrder)
+        storeController.setQuery(requested.text, requested.sort, requested.order)
+        val saved = storeController.state.value
+        _uiState.value = if (saved.query == requested) saved.toStoreUiState()
+            else ReleaseUiState.StoreSuccess(emptyList(), saved.totalItems, false, "Loading saved inventory…")
+        storeObservationJob = viewModelScope.launch {
+            storeController.state.collect { savedInventory ->
+                if (navigation == navigationRequestGeneration &&
+                    savedInventory.query == StoreQuery(currentStoreQuery, currentSort, currentSortOrder) &&
+                    (_uiState.value is ReleaseUiState.StoreSuccess || _uiState.value is ReleaseUiState.StoreLoading)) {
+                    _uiState.value = savedInventory.toStoreUiState()
                 }
-            } finally {
-                if (generation == storeRequestGeneration) storeFetching = false
             }
         }
+        // Refresh a stale snapshot once when opening the store; typing and sorting stay local.
+        storeController.refresh(token, force = false)
     }
 
-    fun setStoreQuery(query: String) {
-        if (currentStoreQuery == query.trim()) return
+    private fun LocalStoreState.toStoreUiState() = ReleaseUiState.StoreSuccess(
+        listings, totalItems, false, message, isRefreshing
+    )
+
+    fun setStoreQuery(query: String): Boolean {
+        if (currentStoreQuery == query.trim()) return false
         currentStoreQuery = query.trim()
-        if (_uiState.value is ReleaseUiState.StoreLoading || _uiState.value is ReleaseUiState.StoreSuccess) {
-            fetchStoreInventory(storeToken, currentSort, currentSortOrder)
-        }
+        storeController.setQuery(currentStoreQuery, currentSort, currentSortOrder)
+        return true
+    }
+    fun setStoreSort(sort: String, order: String) {
+        currentSort = sort
+        currentSortOrder = order
+        storeController.setQuery(currentStoreQuery, sort, order)
     }
     fun searchStoreInventory(query: String, token: String) {
         currentStoreQuery = query.trim()
@@ -446,10 +428,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
     }
     fun clearStoreSearch(token: String) = searchStoreInventory("", token)
     fun restoreStoreInventory(token: String) = fetchStoreInventory(token, currentSort, currentSortOrder)
-    fun refreshStore() = fetchStoreInventory(storeToken.ifBlank { BuildConfig.DISCOGS_TOKEN }, currentSort, currentSortOrder)
-    fun loadNextPage(token: String) {
-        if (_uiState.value is ReleaseUiState.StoreSuccess) fetchStoreInventory(token, currentSort, currentSortOrder, reset = false)
-    }
+    fun refreshStore() = storeController.refresh(storeToken.ifBlank { BuildConfig.DISCOGS_TOKEN }, force = true)
 
     private fun removeFromAiCacheInBackground(
         listingIds: Collection<Long>
@@ -572,7 +551,6 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                         token,
                         currentSort,
                         currentSortOrder,
-                        reset = true
                     )
 
                 } else {
@@ -621,19 +599,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                     if (response.isSuccessful || response.code() == 404) {
                     localRepository.removeLocalListing(listingId)
                         deletedIds += listingId
-                        currentListings.removeAll { it.id == listingId }
-
-                        val previousState =
-                            _uiState.value as? ReleaseUiState.StoreSuccess
-
-                        _uiState.value = ReleaseUiState.StoreSuccess(
-                            listings = currentListings.toList(),
-                            totalItems =
-                                (previousState?.totalItems ?: currentListings.size)
-                                    .minus(1)
-                                    .coerceAtLeast(0),
-                            isFetchingMore = false
-                        )
+                        // The store observes this confirmed deletion from the local database.
                     } else {
                         failedCount++
                         Log.e(
@@ -657,13 +623,11 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                 )
             }
 
-            // Refresh once at the end so the visible inventory exactly matches
-            // Discogs after all successful deletions.
+            // Return to the saved snapshot containing the confirmed deletions.
             fetchStoreInventory(
                 token = token,
                 sort = currentSort,
                 sortOrder = currentSortOrder,
-                reset = true
             )
 
             Log.d(
@@ -861,7 +825,6 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                             token = token,
                             sort = currentSort,
                             sortOrder = currentSortOrder,
-                            reset = true
                         )
                     }
 

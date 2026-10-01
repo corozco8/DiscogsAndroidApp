@@ -62,6 +62,17 @@ class MarketplacePriceGuideTest {
     @Test fun oldCachesWithoutIndividualPricesStillDecode() {
         val restored = Json.decodeFromString<ActiveMarketplaceConditionPrices>("""{"mediaLowest":{"Very Good (VG)":10.0}}""")
         assertTrue(restored.firstPagePrices.isEmpty())
+        assertTrue(restored.mediaPriceSamples.isEmpty())
+        assertTrue(restored.mediaSleevePriceSamples.isEmpty())
         assertEquals(10.0, restored.mediaLowest["Very Good (VG)"]!!, 0.0)
+    }
+
+    @Test fun cachedSnapshotsPreserveIndividualComparablePrices() {
+        val source = ActiveMarketplaceConditionPrices(
+            mediaPriceSamples = mapOf("Very Good (VG)" to listOf(1.0, 10.0, 20.0)),
+            mediaSleevePriceSamples = mapOf("Very Good (VG)||Generic" to listOf(1.0, 10.0)))
+        val restored = Json.decodeFromString<ActiveMarketplaceConditionPrices>(
+            Json.encodeToString(ActiveMarketplaceConditionPrices.serializer(), source))
+        assertEquals(source, restored)
     }
 }

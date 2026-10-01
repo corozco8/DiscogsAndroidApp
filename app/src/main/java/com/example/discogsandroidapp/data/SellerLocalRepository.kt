@@ -54,11 +54,11 @@ class SellerLocalRepository(context: Context) {
         dao.updateInventoryListing(id, price, media, sleeve, comments)
     }
 
-    suspend fun syncAll(token: String) {
+    suspend fun syncAll(token: String, includeInventory: Boolean) {
         val priorListingDates = dao.getInventorySnapshot()
             .filter { it.listedDateIsExact && it.listedAtEpochMs > 0 }
             .associate { it.listingId to it.listedAtEpochMs }
-        syncInventory(token, force = false)
+        if (includeInventory) syncInventory(token, force = false)
         syncRecentOrders(token, priorListingDates = priorListingDates)
     }
 

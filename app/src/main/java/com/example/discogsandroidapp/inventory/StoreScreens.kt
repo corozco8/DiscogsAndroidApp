@@ -24,7 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -63,6 +63,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -89,9 +90,11 @@ fun StoreScreen(
     token: String,
     listState: LazyListState,
     totalItems: Int,
-    isFetchingMore: Boolean,
+    syncMessage: String = "",
+    isRefreshing: Boolean = false,
+    searchQuery: String = "",
+    onRefresh: () -> Unit = {},
     onSortChanged: (sort: String, sortOrder: String) -> Unit,
-    onLoadMore: () -> Unit,
     onDeleteListing: (Long) -> Unit,
     onDeleteSelected: (List<Long>) -> Unit,
     onEditListing: (Long, Double, String, String, String) -> Unit,
@@ -100,7 +103,7 @@ fun StoreScreen(
     var expanded by remember { mutableStateOf(false) }
     var listingToEdit by remember { mutableStateOf<InventoryListing?>(null) }
     var listingToView by remember { mutableStateOf<InventoryListing?>(null) }
-    var selectedListingIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var selectedListingIds by remember(searchQuery) { mutableStateOf<Set<Long>>(emptySet()) }
 
     val selectionMode = selectedListingIds.isNotEmpty()
 
@@ -198,7 +201,8 @@ fun StoreScreen(
                         fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = "${java.text.NumberFormat.getIntegerInstance(java.util.Locale.getDefault()).format(totalItems)} active listings",
+                        text = if (searchQuery.isBlank()) "${java.text.NumberFormat.getIntegerInstance(java.util.Locale.getDefault()).format(totalItems)} active listings"
+                            else "${listings.size} matches · ${java.text.NumberFormat.getIntegerInstance(java.util.Locale.getDefault()).format(totalItems)} active listings",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -228,9 +232,26 @@ fun StoreScreen(
                         DropdownMenuItem(text = { Text("Title: Z-A") }, onClick = { onSortChanged("title", "desc"); expanded = false })
                         DropdownMenuItem(text = { Text("Artist: A-Z") }, onClick = { onSortChanged("artist", "asc"); expanded = false })
                         DropdownMenuItem(text = { Text("Artist: Z-A") }, onClick = { onSortChanged("artist", "desc"); expanded = false })
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text("Refresh inventory") },
+                            enabled = !isRefreshing,
+                            onClick = { expanded = false; onRefresh() }
+                        )
                     }
                 }
             }
+        }
+
+        if (!isRefreshing && (syncMessage.contains("failed", ignoreCase = true) || syncMessage.startsWith("Could not"))) {
+            Text(
+                text = syncMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
 
         if (listings.isEmpty()) {
@@ -239,7 +260,8 @@ fun StoreScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "No inventory results found.",
+                    text = if (syncMessage.startsWith("Loading") || syncMessage.startsWith("Downloading")) syncMessage
+                        else "No inventory results found.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -254,14 +276,10 @@ fun StoreScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(9.dp)
             ) {
-                itemsIndexed(
+                items(
                     items = listings,
-                    key = { _, listing -> listing.id }
-                ) { index, listing ->
-                    if (index == listings.lastIndex && !selectionMode) {
-                        LaunchedEffect(listing.id) { onLoadMore() }
-                    }
-
+                    key = { listing -> listing.id }
+                ) { listing ->
                     val isSelected = listing.id in selectedListingIds
 
                     InventoryItemCard(
@@ -281,18 +299,6 @@ fun StoreScreen(
                     )
                 }
 
-                if (isFetchingMore) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator()
-                        }
-                    }
-                }
             }
         }
     }
@@ -536,7 +542,10 @@ fun EditListingDialog(
                                 shape = RoundedCornerShape(16.dp),
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                 contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.clickable { condition = fullGrade }
+                                modifier = Modifier.clickable {
+                                    comments = listingDescriptionForGrade(comments, fullGrade)
+                                    condition = fullGrade
+                                }
                             ) {
                                 Text(
                                     text = getShortGrade(fullGrade),
@@ -583,6 +592,7 @@ fun EditListingDialog(
                     value = comments,
                     onValueChange = { comments = it },
                     label = { Text("Description / Comments") },
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     maxLines = 3,
                     modifier = Modifier.keyboardInputArea().fillMaxWidth()
                 )
@@ -623,6 +633,17 @@ fun EditListingDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+private val gradeDescriptions = mapOf(
+    "Mint (M)" to "This is a sealed record, cannot be returned once opened. Sold as a factory sealed collectible",
+    "Near Mint (NM or M-)" to "A nearly perfect record with no obvious signs of wear"
+)
+
+internal fun listingDescriptionForGrade(description: String, grade: String): String {
+    // Keep any seller-written text. Only blank text and untouched presets follow the media grade.
+    if (description.isNotBlank() && description !in gradeDescriptions.values) return description
+    return gradeDescriptions[grade].orEmpty()
 }
 
 fun getShortGrade(grade: String): String {

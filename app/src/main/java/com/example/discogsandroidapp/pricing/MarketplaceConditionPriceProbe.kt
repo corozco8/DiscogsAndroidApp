@@ -11,7 +11,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * Lowest live Discogs Marketplace asking prices discovered from the current
+ * Individual live Discogs Marketplace asking prices and minima from the current
  * release's marketplace listings page.
  *
  * mediaLowest:
@@ -46,7 +46,9 @@ fun ReleasePriceSummary.withActiveMarketplacePrices(
         activeMediaSleeveLowestPrices =
             prices.mediaSleeveLowest,
         activeMediaListingCounts = prices.mediaListingCounts,
-        activeMediaSleeveListingCounts = prices.mediaSleeveListingCounts
+        activeMediaSleeveListingCounts = prices.mediaSleeveListingCounts,
+        activeMediaPriceSamples = prices.mediaPriceSamples,
+        activeMediaSleevePriceSamples = prices.mediaSleevePriceSamples
     )
 }
 
@@ -79,7 +81,7 @@ fun marketplaceUrlBelongsToRelease(
 fun marketplaceReleaseListingsUrl(
     releaseId: Long,
     page: Int = 1,
-    limit: Int = 250,
+    limit: Int = 50,
     condition: String? = null
 ): String {
     val safePage = page.coerceAtLeast(1)
@@ -331,6 +333,8 @@ private fun evaluateMarketplaceSampleWithRates(
                 pairs: {},
                 mediaCounts: {},
                 pairCounts: {},
+                mediaSamples: {},
+                pairSamples: {},
                 firstPagePrices: [],
                 rowCount: rows.length,
                 emptyConfirmed: false
@@ -366,10 +370,14 @@ private fun evaluateMarketplaceSampleWithRates(
 
                 setMin(result.media, media, price);
                 result.mediaCounts[media] = (result.mediaCounts[media] || 0) + 1;
+                if (!result.mediaSamples[media]) result.mediaSamples[media] = [];
+                result.mediaSamples[media].push(price);
                 if (sleeve) {
                     setMin(result.pairs, media + '||' + sleeve, price);
                     const pair = media + '||' + sleeve;
                     result.pairCounts[pair] = (result.pairCounts[pair] || 0) + 1;
+                    if (!result.pairSamples[pair]) result.pairSamples[pair] = [];
+                    result.pairSamples[pair].push(price);
                 }
             });
 
@@ -438,6 +446,8 @@ private fun evaluateMarketplaceSampleWithRates(
                         mediaSleeveLowest = readPriceMap("pairs"),
                         mediaListingCounts = readCountMap("mediaCounts"),
                         mediaSleeveListingCounts = readCountMap("pairCounts"),
+                        mediaPriceSamples = readSampleMap(json.optJSONObject("mediaSamples")),
+                        mediaSleevePriceSamples = readSampleMap(json.optJSONObject("pairSamples")),
                         firstPagePrices = json.optJSONArray("firstPagePrices")?.let { values ->
                             (0 until minOf(values.length(), 250)).mapNotNull { index ->
                                 values.optDouble(index, Double.NaN).takeIf { it.isFinite() && it > 0.0 }
@@ -519,6 +529,8 @@ fun beginMarketplacePriceScan(
             append('|').append(sample.prices.mediaListingCounts.toSortedMap())
             append('|').append(sample.prices.mediaSleeveListingCounts.toSortedMap())
             append('|').append(sample.prices.firstPagePrices)
+            append('|').append(sample.prices.mediaPriceSamples.toSortedMap())
+            append('|').append(sample.prices.mediaSleevePriceSamples.toSortedMap())
         }
     }
 

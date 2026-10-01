@@ -50,9 +50,9 @@ class SellerInsightsViewModel(
             null
         )
 
-    fun refreshNow() {
+    fun refreshNow(includeInventory: Boolean = false) {
         SellerSyncScheduler.enqueueNow(
-            getApplication()
+            getApplication(), includeInventory = includeInventory
         )
     }
 }

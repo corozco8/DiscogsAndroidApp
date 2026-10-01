@@ -25,15 +25,25 @@ import android.util.Log
 fun ReleaseViewModel.search(query: String, token: String) {
     if (query.isBlank()) return
 
-    navigationRequestGeneration++
+    invalidateNavigationRequests()
     val generation = navigationRequestGeneration
-    navigationRequestJob?.cancel()
+
+    // Saving history must never delay publishing cached results or starting the network request.
+    viewModelScope.launch {
+        try { ReleaseSearchHistory.remember(getApplication(), query = query) }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { Log.w("SEARCH_HISTORY", "Could not save recent search", e) }
+    }
+    ReleaseSearchRepository.peek(query, token)?.let { response ->
+        _uiState.value = ReleaseUiState.SearchSuccess(response.results)
+        navigationRequestJob = null
+        return
+    }
 
     navigationRequestJob = viewModelScope.launch {
         _uiState.value = ReleaseUiState.Loading
 
         try {
-            ReleaseSearchHistory.remember(getApplication(), query = query)
             val response = ReleaseSearchRepository.search(query, token)
 
             if (generation == navigationRequestGeneration) {
@@ -54,9 +64,8 @@ fun ReleaseViewModel.search(query: String, token: String) {
 }
 
 fun ReleaseViewModel.fetchRelease(releaseId: Long, token: String) {
-    navigationRequestGeneration++
+    invalidateNavigationRequests()
     val generation = navigationRequestGeneration
-    navigationRequestJob?.cancel()
 
     navigationRequestJob = viewModelScope.launch {
         _uiState.value = ReleaseUiState.Loading

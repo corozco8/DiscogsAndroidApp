@@ -35,6 +35,19 @@ import kotlinx.coroutines.launch
 class ReleaseSearchInteractionTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun cachedSuggestionsAppearWithoutDebounceOrAnotherRequest() {
+        val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as Application
+        val response = DiscogsSearchResponse(listOf(SearchResult(54321, "Fleetwood Mac - Rumours")))
+        val reads = AtomicInteger()
+        val model = ReleaseSearchSuggestionsViewModel(application, cachedResults = { _, _ -> response }) { _, _ ->
+            reads.incrementAndGet(); response
+        }
+        model.update("Rumours", true, "test")
+        assertEquals(54321, model.state.value.results.single().id)
+        assertTrue(!model.state.value.loading)
+        assertEquals(0, reads.get())
+    }
+
     @Test fun pressingEnterWhileSuggestionsLoadSharesTheRequest() {
         val application = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as Application
         val cache = ReleaseSearchCache()

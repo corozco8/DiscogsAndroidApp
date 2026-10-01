@@ -10,7 +10,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 
-enum class MarketplaceUiPriceStatus { LOADING, CACHED, FRESH, PARTIAL, NO_MATCH, FAILED, BLOCKED, VERIFICATION_REQUIRED, RATE_LIMITED, NETWORK, UNREADABLE, TIMEOUT }
+enum class MarketplaceUiPriceStatus { IDLE, LOADING, CACHED, FRESH, PARTIAL, NO_MATCH, FAILED, BLOCKED, VERIFICATION_REQUIRED, RATE_LIMITED, NETWORK, UNREADABLE, TIMEOUT }
 
 @Serializable
 data class MarketplacePriceSnapshot(
@@ -22,8 +22,9 @@ data class MarketplacePriceSnapshot(
     val complete: Boolean = true
 )
 
+internal const val MARKETPLACE_LIVE_PRICE_TTL_MS = 15 * 60_000L
 internal fun MarketplacePriceSnapshot.isFresh(now: Long = System.currentTimeMillis()) =
-    now - updatedAtMillis in 0 until 15 * 60_000L
+    now - updatedAtMillis in 0 until MARKETPLACE_LIVE_PRICE_TTL_MS
 
 /** Older observations remain available for display for a day, explicitly labelled as cached. */
 internal fun MarketplacePriceSnapshot.isUsable(now: Long = System.currentTimeMillis()) =

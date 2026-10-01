@@ -135,7 +135,7 @@ class MainActivity : ComponentActivity() {
             // Your API Token
             val token = BuildConfig.DISCOGS_TOKEN
 
-            // Fetch the profile and keep the new local seller database fresh.
+            // Refresh the profile and orders; inventory downloads happen on demand.
             LaunchedEffect(Unit) {
                 viewModel.fetchUserProfile(token)
                 SellerSyncScheduler.schedulePeriodic(appContext)
@@ -146,6 +146,7 @@ class MainActivity : ComponentActivity() {
                 val snackbarHostState = remember { SnackbarHostState() }
                 val appScope = rememberCoroutineScope()
 
+                Box(Modifier.fillMaxSize()) {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -157,18 +158,17 @@ class MainActivity : ComponentActivity() {
                     val orderStatusUpdates by viewModel.orderStatusUpdates.collectWhileStarted()
 
                     var searchQuery by remember { mutableStateOf("") }
-                    LaunchedEffect(searchQuery, storeVisible) {
-                        if (storeVisible) {
-                            kotlinx.coroutines.delay(350)
-                            viewModel.setStoreQuery(searchQuery)
-                        }
-                    }
                     var storeSort by remember { mutableStateOf("listed") }
                     var storeSortOrder by remember { mutableStateOf("desc") }
                     // Hoist the My Store list state above the navigation content so
                     // opening a release does not discard the user's scroll position.
                     var storeVisit by remember { mutableStateOf(0) }
                     val storeListState = key(storeVisit) { rememberLazyListState() }
+                    LaunchedEffect(searchQuery, storeVisible) {
+                        if (storeVisible && viewModel.setStoreQuery(searchQuery)) {
+                            storeListState.scrollToItem(0)
+                        }
+                    }
                     val ordersListState = rememberLazyListState()
                     var ordersScrollIndex by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
                     var ordersScrollOffset by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
@@ -819,7 +819,10 @@ class MainActivity : ComponentActivity() {
                                             token = token,
                                             listState = storeListState,
                                             totalItems = state.totalItems,
-                                            isFetchingMore = state.isFetchingMore,
+                                            syncMessage = state.syncMessage,
+                                            isRefreshing = state.isRefreshing,
+                                            searchQuery = searchQuery,
+                                            onRefresh = viewModel::refreshStore,
                                             onSortChanged = { sortField, sortOrder ->
                                                 storeSort = sortField
                                                 storeSortOrder = sortOrder
@@ -828,15 +831,7 @@ class MainActivity : ComponentActivity() {
                                                 appScope.launch {
                                                     storeListState.scrollToItem(0)
                                                 }
-                                                viewModel.fetchStoreInventory(
-                                                    token,
-                                                    sortField,
-                                                    sortOrder,
-                                                    reset = true
-                                                )
-                                            },
-                                            onLoadMore = {
-                                                viewModel.loadNextPage(token)
+                                                viewModel.setStoreSort(sortField, sortOrder)
                                             },
                                             onDeleteListing = { listingId ->
                                                 viewModel.deleteListing(listingId, token)
@@ -1248,7 +1243,7 @@ class MainActivity : ComponentActivity() {
                                                 viewModel.resetToIdle()
                                             },
                                             onRefreshClick = {
-                                                sellerInsightsViewModel.refreshNow()
+                                                sellerInsightsViewModel.refreshNow(includeInventory = true)
                                             }
                                         )
                                     }
@@ -1286,6 +1281,10 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                }
+                com.example.discogsandroidapp.ui.shared.ApiRequestCounter(
+                    Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(top = 2.dp, end = 6.dp)
+                )
                 }
             }
         }

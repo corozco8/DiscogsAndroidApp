@@ -9,12 +9,8 @@ import androidx.compose.ui.platform.LocalContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-private object PricingCooldowns {
-    val releases = mutableMapOf<Long, Pair<MarketplaceUiPriceStatus, Long>>()
-    val forceNextVisit = mutableSetOf<Long>()
-    val blockedUntil: Long get() = MarketplaceTraffic.policy.blockedUntil
+private object PricingSessions {
     val verificationGate = MarketplaceVerificationGate()
-    fun remaining(id: Long) = (maxOf(blockedUntil, releases[id]?.second ?: 0L) - System.currentTimeMillis()).coerceAtLeast(0)
 }
 
 /** Shared by release details and the visible marketplace; owned by the current screen. */
@@ -23,21 +19,21 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
     var needsLoad by mutableStateOf(false); private set
     var attempt by mutableIntStateOf(0); private set
     var snapshot by mutableStateOf<MarketplacePriceSnapshot?>(null); private set
-    var status by mutableStateOf(MarketplaceUiPriceStatus.LOADING); private set
-    var retryInSeconds by mutableLongStateOf(0L); private set
+    var status by mutableStateOf(MarketplaceUiPriceStatus.IDLE); private set
+    var errorDetails by mutableStateOf<String?>(null); private set
     private var loadAllowed by mutableStateOf(false)
+    private var explicitLoad = false
+    private var forcePageReload = false
     var verificationVisible by mutableStateOf(false); private set
-    fun updateCooldown() { retryInSeconds = releaseId?.let { (PricingCooldowns.remaining(it) + 999) / 1000 } ?: 0 }
     private var generation = 0
     private var active = true
     private var webView: WebView? = null
     private var lastHttpStatus: Int? = null
     private var inspectedGeneration: Int? = null
     private var scannedGeneration = -1
-    val canShowPage: Boolean get() = status != MarketplaceUiPriceStatus.RATE_LIMITED &&
-        (webView != null || loadAllowed)
+    val canShowPage: Boolean get() = webView != null || loadAllowed
     val listingInfo: ListingPricingInfo get() = ListingPricingInfo(
-        status, message, snapshot != null && status != MarketplaceUiPriceStatus.FRESH, retryInSeconds
+        status, message, snapshot != null && status != MarketplaceUiPriceStatus.FRESH
     )
     val prices: ActiveMarketplaceConditionPrices? get() = snapshot?.prices
     val message: String get() {
@@ -46,6 +42,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             "Saved prices checked $age min ago. "
         }.orEmpty()
         return when (status) {
+            MarketplaceUiPriceStatus.IDLE -> "Open Sell or Marketplace Listings to check live prices."
             MarketplaceUiPriceStatus.LOADING -> cached + "Checking marketplace prices…"
             MarketplaceUiPriceStatus.CACHED -> cached + "First page of listings; shipping excluded."
             MarketplaceUiPriceStatus.FRESH -> "Prices checked now. First page of listings; shipping excluded."
@@ -53,9 +50,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             MarketplaceUiPriceStatus.PARTIAL -> cached + "Only part of the page could be read."
             MarketplaceUiPriceStatus.BLOCKED -> cached + "Discogs blocked the page. Open Marketplace Listings to check access."
             MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> cached + "Discogs requires a Cloudflare security check before live prices can be read."
-            MarketplaceUiPriceStatus.RATE_LIMITED -> cached + if (retryInSeconds > 0)
-                "Marketplace website temporarily limited requests. Orders and release search can still work."
-                else "Marketplace pause ended. Tap Refresh to check access again."
+            MarketplaceUiPriceStatus.RATE_LIMITED -> cached + "Discogs returned Too many requests. Open Marketplace Listings to view the response, or tap Refresh prices to try again."
             MarketplaceUiPriceStatus.NETWORK -> cached + "Connection failed. Check your connection and retry."
             MarketplaceUiPriceStatus.TIMEOUT -> cached + "The marketplace page took too long to load."
             MarketplaceUiPriceStatus.UNREADABLE -> cached + "Could not read listing prices from this page."
@@ -67,79 +62,85 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         MarketplacePricingCache.initialize(context)
         if (!active) return
         snapshot = releaseId?.let { getCachedMarketplacePriceSnapshot(it) }
-        val cooling = releaseId?.let { PricingCooldowns.remaining(it) > 0 } == true
         status = when {
-            cooling -> if (PricingCooldowns.blockedUntil > System.currentTimeMillis()) MarketplaceUiPriceStatus.RATE_LIMITED
-                else PricingCooldowns.releases[releaseId]?.first ?: MarketplaceUiPriceStatus.FAILED
             snapshot != null -> if (snapshot!!.prices.mediaLowest.isEmpty() && snapshot!!.prices.firstPagePrices.isEmpty()) MarketplaceUiPriceStatus.NO_MATCH else MarketplaceUiPriceStatus.CACHED
-            else -> MarketplaceUiPriceStatus.LOADING
+            else -> MarketplaceUiPriceStatus.IDLE
         }
-        val forced = PricingCooldowns.forceNextVisit.remove(releaseId)
-        needsLoad = releaseId != null && (forced || snapshot?.isFresh() != true) && !cooling
-        updateCooldown()
+        // Browsing a release must never start a marketplace website request.
+        needsLoad = false
         ready = true
     }
 
     suspend fun prepareLoad() {
         if (!active || !needsLoad || webView != null || loadAllowed) return
         // A cached guide stays visible while rapid release visits settle and page loads are spaced.
-        kotlinx.coroutines.delay(500)
+        if (!explicitLoad) kotlinx.coroutines.delay(500)
         while (active && needsLoad) {
-            if (MarketplaceTraffic.policy.blockedFor() > 0) {
-                status = MarketplaceUiPriceStatus.RATE_LIMITED
-                needsLoad = false
-                updateCooldown()
-                return
-            }
-            if (MarketplaceTraffic.policy.reserveLoad()) {
+            if (MarketplaceTraffic.policy.reserveLoad(explicit = explicitLoad)) {
                 loadAllowed = true
+                explicitLoad = false
                 return
             }
             kotlinx.coroutines.delay(minOf(MarketplaceTraffic.policy.waitForLoad(), 1_000L).coerceAtLeast(1))
         }
     }
     fun refresh() {
-        val id = releaseId ?: return
-        if (PricingCooldowns.remaining(id) > 0) return
+        if (!active || releaseId == null) return
         generation++
         destroyView()
         loadAllowed = false
+        errorDetails = null
         status = MarketplaceUiPriceStatus.LOADING
         needsLoad = true
+        explicitLoad = true
+        forcePageReload = true
         attempt++
     }
-    fun refreshOnNextVisit() {
-        releaseId?.takeIf { PricingCooldowns.remaining(it) == 0L }?.let {
-            PricingCooldowns.forceNextVisit.add(it)
+    fun requestSellPrices() {
+        if (!active || !ready || releaseId == null || needsLoad) return
+        if (webView != null) {
+            if (snapshot != null && snapshot?.isFresh() == false && status in setOf(
+                    MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) refresh()
+            return
         }
+        if (snapshot?.isFresh() == true) {
+            MarketplaceTrafficReport.log.priceReuse(releaseId)
+            return
+        }
+        requestVisiblePage()
     }
     fun requestVisiblePage() {
-        if (!ready || webView != null || needsLoad || status == MarketplaceUiPriceStatus.RATE_LIMITED) return
-        if (releaseId == null || PricingCooldowns.remaining(releaseId) > 0) return
+        if (!active || !ready || releaseId == null) return
+        // Reuse even a failed response. Only Refresh should send another request.
+        if (webView != null) {
+            if (snapshot != null && snapshot?.isFresh() == false && status in setOf(
+                    MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) {
+                refresh()
+                return
+            }
+            MarketplaceTrafficReport.log.pageReuse(releaseId)
+            return
+        }
+        if (needsLoad && explicitLoad) return
         needsLoad = true
+        explicitLoad = true
         status = MarketplaceUiPriceStatus.LOADING
         attempt++
     }
-    private fun fail(failure: MarketplaceUiPriceStatus, retryMs: Long = 60_000L, retryAfter: String? = null) {
+    /** Record a page error without scheduling retries or blocking the seller's next request. */
+    fun onPageError(failure: MarketplaceUiPriceStatus, preserveResponse: Boolean = false) {
+        if (!active) return
         generation++ // Invalidate delayed scans; onPageFinished cannot overwrite a failed navigation.
         scannedGeneration = generation
         status = failure
-        needsLoad = false
-        webView?.stopLoading()
-        val until = if (failure == MarketplaceUiPriceStatus.RATE_LIMITED)
-            MarketplaceTraffic.limited(retryAfter) else System.currentTimeMillis() + retryMs
-        releaseId?.let {
-            PricingCooldowns.releases[it] = failure to until
-            if (PricingCooldowns.releases.size > 128) PricingCooldowns.releases.keys.firstOrNull()?.let(PricingCooldowns.releases::remove)
+        if (errorDetails == null) {
+            MarketplaceTrafficReport.log.error(releaseId ?: 0, "Marketplace status: $failure")
         }
+        needsLoad = false
+        if (!preserveResponse) webView?.stopLoading()
         if (failure == MarketplaceUiPriceStatus.RATE_LIMITED) {
             verificationVisible = false
-            val failedView = webView
-            failedView?.post {
-                if (webView === failedView && status == MarketplaceUiPriceStatus.RATE_LIMITED) destroyView()
-            }
         }
-        updateCooldown()
     }
     private fun requireVerification() {
         if (status != MarketplaceUiPriceStatus.VERIFICATION_REQUIRED) {
@@ -147,15 +148,9 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             scannedGeneration = -1
         }
         status = MarketplaceUiPriceStatus.VERIFICATION_REQUIRED
-        releaseId?.let {
-            PricingCooldowns.releases[it] = status to (System.currentTimeMillis() + 60_000L)
-        }
-        updateCooldown()
     }
     fun openVerification(automatic: Boolean = false) {
-        if (!active || verificationVisible || !PricingCooldowns.verificationGate.shouldOpen(
-                status, automatic, PricingCooldowns.blockedUntil > System.currentTimeMillis()
-            )) return
+        if (!active || verificationVisible || !PricingSessions.verificationGate.shouldOpen(status, automatic)) return
         needsLoad = true
         verificationVisible = true
     }
@@ -179,8 +174,12 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             configureVisibility(existing, hidden)
             return existing
         }
-        check(canShowPage) { "Marketplace loading is paused during cooldown" }
-        return WebView(context).apply {
+        check(canShowPage) { "Marketplace page load has not been prepared" }
+        val parked = MarketplacePageCache.take(releaseId!!)
+        val cached = parked?.takeIf { !forcePageReload && it.snapshot.isFresh() && allowed(it.view.url) }
+        forcePageReload = false
+        if (parked != null && cached == null) parked.view.destroy()
+        return (cached?.view ?: WebView(context.applicationContext)).apply {
         MarketplaceExchangeRates.prepare(context)
         webView = this
         settings.javaScriptEnabled = true
@@ -189,41 +188,61 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         CookieManager.getInstance().setAcceptCookie(true)
         configureVisibility(this, hidden)
         webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                request.url.host?.let(MarketplaceTrafficReport.log::resource)
+                return null
+            }
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 generation++
                 lastHttpStatus = null
                 scannedGeneration = -1
                 if (!allowed(url)) return
+                errorDetails = null
                 status = MarketplaceUiPriceStatus.LOADING
                 val current = generation
                 view.postDelayed({
                     if (active && generation == current && status == MarketplaceUiPriceStatus.LOADING) {
-                        fail(MarketplaceUiPriceStatus.TIMEOUT)
+                        onPageError(MarketplaceUiPriceStatus.TIMEOUT)
                     }
                 }, 15_000L)
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 if (active && view === webView && request.isForMainFrame && allowed(request.url.toString())) {
                     lastHttpStatus = response.statusCode
+                    errorDetails = marketplaceErrorDetails(request.url.toString(), response.statusCode,
+                        response.responseHeaders.orEmpty())
+                    MarketplaceTrafficReport.log.error(releaseId, errorDetails!!)
+                    android.util.Log.w("MarketplaceResponse", errorDetails!!)
                     val challenge = response.responseHeaders?.entries?.any {
                         it.key.equals("cf-mitigated", true) && it.value.equals("challenge", true)
                     } == true
                     if (challenge && response.statusCode != 429) requireVerification()
-                    else fail(pricingHttpStatus(response.statusCode), retryAfter =
-                        response.responseHeaders?.entries?.firstOrNull { it.key.equals("Retry-After", true) }?.value)
+                    else onPageError(pricingHttpStatus(response.statusCode), preserveResponse = true)
                 }
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (active && view === webView && request.isForMainFrame && allowed(request.url.toString()) &&
                     status == MarketplaceUiPriceStatus.LOADING)
-                    fail(MarketplaceUiPriceStatus.NETWORK)
+                    onPageError(MarketplaceUiPriceStatus.NETWORK)
             }
             override fun onPageFinished(view: WebView, url: String) {
                 // Error pages can contain an actionable challenge. Inspect them too.
                 inspectPage(view)
             }
         }
-        loadUrl(marketplaceReleaseListingsUrl(releaseId!!))
+        if (cached == null) {
+            MarketplaceTrafficReport.log.pageLoad(releaseId)
+            loadUrl(marketplaceReleaseListingsUrl(releaseId))
+        } else {
+            snapshot = cached.snapshot
+            status = if (cached.snapshot.prices.mediaLowest.isEmpty() && cached.snapshot.prices.firstPagePrices.isEmpty())
+                MarketplaceUiPriceStatus.NO_MATCH else MarketplaceUiPriceStatus.CACHED
+            needsLoad = false
+            generation++
+            scannedGeneration = generation
+            onResume()
+            MarketplaceTrafficReport.log.pageReuse(releaseId)
+        }
         }
     }
     private fun configureVisibility(view: WebView, hidden: Boolean) {
@@ -265,7 +284,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             )) {
                 MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> requireVerification()
                 null -> if (scannedGeneration != generation) scanPrices(view)
-                else -> if (status != access) fail(access)
+                else -> if (status != access) onPageError(access)
             }
         }
     }
@@ -281,16 +300,13 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
                         MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.NO_MATCH -> {
                             status = result
                             snapshot = getCachedMarketplacePriceSnapshot(releaseId)
-                            PricingCooldowns.releases.remove(releaseId)
-                            MarketplaceTraffic.succeeded()
-                            updateCooldown()
                             CookieManager.getInstance().flush()
-                            PricingCooldowns.verificationGate.verified()
+                            PricingSessions.verificationGate.verified()
                             verificationVisible = false
                         }
                         MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> requireVerification()
                         MarketplaceUiPriceStatus.LOADING -> status = result
-                        else -> fail(result)
+                        else -> onPageError(result)
                     }
                 }
             })
@@ -302,7 +318,17 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         }
         webView = null
     }
-    fun dispose() { active = false; generation++; destroyView() }
+    fun dispose() {
+        active = false
+        generation++
+        val page = webView
+        val prices = snapshot
+        if (page != null && releaseId != null && prices?.isFresh() == true && allowed(page.url) &&
+            status in setOf(MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) {
+            webView = null
+            MarketplacePageCache.put(releaseId, page, prices)
+        } else destroyView()
+    }
 }
 
 @Composable
@@ -312,12 +338,6 @@ internal fun rememberMarketplacePricing(releaseId: Long?): MarketplacePricingCon
     LaunchedEffect(controller) { controller.initialize(context) }
     LaunchedEffect(controller, controller.ready, controller.attempt) {
         if (controller.ready) controller.prepareLoad()
-    }
-    LaunchedEffect(controller, controller.status) {
-        do {
-            controller.updateCooldown()
-            if (controller.retryInSeconds > 0) kotlinx.coroutines.delay(1000)
-        } while (controller.retryInSeconds > 0)
     }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
     return controller
