@@ -5,11 +5,16 @@ import android.content.Context
 /** Space automatic price checks; an explicit user request can always load immediately. */
 internal class MarketplaceLoadPolicy(private val now: () -> Long = System::currentTimeMillis) {
     private var nextLoadAt = 0L
+    var automaticChecksSuspended: Boolean = false
+        private set
+
+    fun recordBlock() { automaticChecksSuspended = true }
+    fun recordManualSuccess() { automaticChecksSuspended = false }
 
     fun waitForLoad(): Long = (nextLoadAt - now()).coerceAtLeast(0)
 
     fun reserveLoad(explicit: Boolean = false): Boolean {
-        if (!explicit && waitForLoad() > 0) return false
+        if (!explicit && (automaticChecksSuspended || waitForLoad() > 0)) return false
         nextLoadAt = now() + 10_000L
         return true
     }

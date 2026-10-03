@@ -14,7 +14,10 @@ private object PricingSessions {
 }
 
 /** Shared by release details and the visible marketplace; owned by the current screen. */
-internal class MarketplacePricingController(private val releaseId: Long?) {
+internal class MarketplacePricingController(
+    private val releaseId: Long?,
+    private val loadPolicy: MarketplaceLoadPolicy = MarketplaceTraffic.policy
+) {
     var ready by mutableStateOf(false); private set
     var needsLoad by mutableStateOf(false); private set
     var attempt by mutableIntStateOf(0); private set
@@ -23,6 +26,9 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
     var errorDetails by mutableStateOf<String?>(null); private set
     private var loadAllowed by mutableStateOf(false)
     private var explicitLoad = false
+    private var manualAttempt = false
+    private var pageHidden = true
+    @Volatile private var pagePaused = false
     private var forcePageReload = false
     var verificationVisible by mutableStateOf(false); private set
     private var generation = 0
@@ -55,6 +61,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             MarketplaceUiPriceStatus.TIMEOUT -> cached + "The marketplace page took too long to load."
             MarketplaceUiPriceStatus.UNREADABLE -> cached + "Could not read listing prices from this page."
             MarketplaceUiPriceStatus.FAILED -> cached + "Discogs returned a page error."
+            MarketplaceUiPriceStatus.AUTOMATIC_PAUSED -> cached + "Automatic live checks paused after a marketplace block. Tap Check live price to retry."
         } + if (snapshot == null && status !in setOf(MarketplaceUiPriceStatus.LOADING, MarketplaceUiPriceStatus.NO_MATCH)) " You can still enter a price or use the pricing algorithm when available." else ""
     }
     suspend fun initialize(context: Context) {
@@ -76,56 +83,78 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         // A cached guide stays visible while rapid release visits settle and page loads are spaced.
         if (!explicitLoad) kotlinx.coroutines.delay(500)
         while (active && needsLoad) {
-            if (MarketplaceTraffic.policy.reserveLoad(explicit = explicitLoad)) {
+            if (!explicitLoad && loadPolicy.automaticChecksSuspended) {
+                pauseAutomaticCheck()
+                return
+            }
+            if (loadPolicy.reserveLoad(explicit = explicitLoad)) {
                 loadAllowed = true
                 explicitLoad = false
                 return
             }
-            kotlinx.coroutines.delay(minOf(MarketplaceTraffic.policy.waitForLoad(), 1_000L).coerceAtLeast(1))
+            kotlinx.coroutines.delay(minOf(loadPolicy.waitForLoad(), 1_000L).coerceAtLeast(1))
         }
     }
     fun refresh() {
         if (!active || releaseId == null) return
-        generation++
-        destroyView()
-        loadAllowed = false
+        queueLoad(manual = true, replacePage = true)
+    }
+    private fun queueLoad(manual: Boolean, replacePage: Boolean = false) {
+        if (replacePage) {
+            generation++
+            destroyView()
+            loadAllowed = false
+        }
         errorDetails = null
         status = MarketplaceUiPriceStatus.LOADING
         needsLoad = true
-        explicitLoad = true
-        forcePageReload = true
+        explicitLoad = manual
+        manualAttempt = manual
+        forcePageReload = replacePage
         attempt++
     }
     fun requestSellPrices() {
         if (!active || !ready || releaseId == null || needsLoad) return
-        if (webView != null) {
-            if (snapshot != null && snapshot?.isFresh() == false && status in setOf(
-                    MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) refresh()
-            return
-        }
-        if (snapshot?.isFresh() == true) {
+        // Opening Sell is allowed to perform one marketplace load when this release has
+        // no saved pricing yet. Once a snapshot/page exists, reuse it until the user
+        // explicitly taps Refresh prices. This prevents repeatedly opening the dialog
+        // from generating website traffic.
+        if (snapshot != null || webView != null) {
             MarketplaceTrafficReport.log.priceReuse(releaseId)
             return
         }
-        requestVisiblePage()
+        if (loadPolicy.automaticChecksSuspended) {
+            pauseAutomaticCheck()
+            return
+        }
+        queueLoad(manual = false)
+    }
+    private fun pauseAutomaticCheck() {
+        needsLoad = false
+        loadAllowed = false
+        status = MarketplaceUiPriceStatus.AUTOMATIC_PAUSED
+    }
+    /** Closing Sell before a spaced request starts must cancel that request. */
+    fun cancelAutomaticCheck() {
+        if (!active || !needsLoad || manualAttempt || webView != null) return
+        needsLoad = false
+        loadAllowed = false
+        attempt++
+        status = if (snapshot != null) MarketplaceUiPriceStatus.CACHED else MarketplaceUiPriceStatus.IDLE
     }
     fun requestVisiblePage() {
         if (!active || !ready || releaseId == null) return
-        // Reuse even a failed response. Only Refresh should send another request.
+        // If this controller already owns a page, always reuse it. Staleness alone is
+        // not a reason to send another website request. A second request requires the
+        // user's explicit Refresh action.
         if (webView != null) {
-            if (snapshot != null && snapshot?.isFresh() == false && status in setOf(
-                    MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) {
-                refresh()
-                return
-            }
             MarketplaceTrafficReport.log.pageReuse(releaseId)
             return
         }
         if (needsLoad && explicitLoad) return
-        needsLoad = true
-        explicitLoad = true
-        status = MarketplaceUiPriceStatus.LOADING
-        attempt++
+        // Opening Marketplace Listings is an explicit request to view the page, so one
+        // initial navigation is allowed when no reusable page exists.
+        queueLoad(manual = true)
     }
     /** Record a page error without scheduling retries or blocking the seller's next request. */
     fun onPageError(failure: MarketplaceUiPriceStatus, preserveResponse: Boolean = false) {
@@ -133,6 +162,9 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         generation++ // Invalidate delayed scans; onPageFinished cannot overwrite a failed navigation.
         scannedGeneration = generation
         status = failure
+        if (failure in setOf(MarketplaceUiPriceStatus.RATE_LIMITED, MarketplaceUiPriceStatus.BLOCKED)) {
+            loadPolicy.recordBlock()
+        }
         if (errorDetails == null) {
             MarketplaceTrafficReport.log.error(releaseId ?: 0, "Marketplace status: $failure")
         }
@@ -152,6 +184,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
     fun openVerification(automatic: Boolean = false) {
         if (!active || verificationVisible || !PricingSessions.verificationGate.shouldOpen(status, automatic)) return
         needsLoad = true
+        if (!automatic) manualAttempt = true
         verificationVisible = true
     }
     fun closeVerification() { verificationVisible = false }
@@ -182,13 +215,14 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
         return (cached?.view ?: WebView(context.applicationContext)).apply {
         MarketplaceExchangeRates.prepare(context)
         webView = this
-        settings.javaScriptEnabled = true
+        settings.javaScriptEnabled = cached == null || !hidden
         settings.domStorageEnabled = true
         // Keep the standard User-Agent and the same WebView/session for human verification.
         CookieManager.getInstance().setAcceptCookie(true)
-        configureVisibility(this, hidden)
         webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                if (pagePaused) return WebResourceResponse("text/plain", "UTF-8",
+                    java.io.ByteArrayInputStream(ByteArray(0)))
                 request.url.host?.let(MarketplaceTrafficReport.log::resource)
                 return null
             }
@@ -231,6 +265,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             }
         }
         if (cached == null) {
+            configureVisibility(this, hidden)
             MarketplaceTrafficReport.log.pageLoad(releaseId)
             loadUrl(marketplaceReleaseListingsUrl(releaseId))
         } else {
@@ -240,17 +275,46 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             needsLoad = false
             generation++
             scannedGeneration = generation
-            onResume()
+            configureVisibility(this, hidden)
             MarketplaceTrafficReport.log.pageReuse(releaseId)
         }
         }
     }
+    /** Presentation-only update used by Compose recomposition. Never loads or recreates a page. */
+    fun updateWebViewVisibility(view: WebView?, hidden: Boolean) {
+        if (!active || view == null || view !== webView) return
+        configureVisibility(view, hidden)
+    }
+
     private fun configureVisibility(view: WebView, hidden: Boolean) {
+        pageHidden = hidden
         view.isClickable = !hidden
         view.isFocusable = !hidden
         view.isFocusableInTouchMode = !hidden
         view.settings.loadsImagesAutomatically = !hidden
         view.settings.blockNetworkImage = hidden
+        if (hidden && status in setOf(MarketplaceUiPriceStatus.FRESH,
+                MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) {
+            pauseHiddenPage(view)
+        } else {
+            pagePaused = false
+            view.settings.javaScriptEnabled = true
+            view.onResume()
+        }
+    }
+    private fun pauseHiddenPage(view: WebView) {
+        if (!pageHidden) return
+        pagePaused = true
+        view.stopLoading()
+        view.settings.javaScriptEnabled = false
+        view.onPause()
+    }
+    /** A successful page moved out of a visible host must stop background work too. */
+    fun onPageDetached(view: WebView) {
+        if (view !== webView || view.parent != null || status !in setOf(
+                MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.CACHED, MarketplaceUiPriceStatus.NO_MATCH)) return
+        pageHidden = true
+        pauseHiddenPage(view)
     }
     private fun inspectPage(view: WebView) {
         if (!active || view !== webView || !allowed(view.url) ||
@@ -298,11 +362,14 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
                 if (active && current == generation) {
                     when (result) {
                         MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.NO_MATCH -> {
+                            if (manualAttempt || verificationVisible) loadPolicy.recordManualSuccess()
                             status = result
+                            needsLoad = false
                             snapshot = getCachedMarketplacePriceSnapshot(releaseId)
                             CookieManager.getInstance().flush()
                             PricingSessions.verificationGate.verified()
                             verificationVisible = false
+                            pauseHiddenPage(view)
                         }
                         MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> requireVerification()
                         MarketplaceUiPriceStatus.LOADING -> status = result
@@ -317,6 +384,7 @@ internal class MarketplacePricingController(private val releaseId: Long?) {
             stopLoading(); webViewClient = WebViewClient(); destroy()
         }
         webView = null
+        pagePaused = false
     }
     fun dispose() {
         active = false

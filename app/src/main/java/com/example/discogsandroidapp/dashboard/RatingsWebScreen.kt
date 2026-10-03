@@ -1,12 +1,11 @@
 package com.example.discogsandroidapp.dashboard
 
-import com.example.discogsandroidapp.MainActivity
-
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,8 +27,9 @@ fun RatingsWebScreen(
     }
 
     var webView by remember { mutableStateOf<WebView?>(null) }
+    val requestedUrl = remember { arrayOf<String?>(null) }
 
-    DisposableEffect(url) {
+    DisposableEffect(Unit) {
         onDispose {
             webView?.apply {
                 stopLoading()
@@ -58,14 +58,21 @@ fun RatingsWebScreen(
                 android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                 webViewClient = WebViewClient()
+                requestedUrl[0] = url
                 loadUrl(url)
             }
         },
         update = { view ->
+            // Compose may run this block many times. Keep it side-effect free.
             webView = view
-            if (view.url != url) {
-                view.loadUrl(url)
-            }
         }
     )
+
+    LaunchedEffect(url, webView) {
+        val view = webView ?: return@LaunchedEffect
+        if (requestedUrl[0] != url) {
+            requestedUrl[0] = url
+            view.loadUrl(url)
+        }
+    }
 }

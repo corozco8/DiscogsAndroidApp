@@ -383,6 +383,16 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
     private var currentStoreQuery = ""
     private var storeToken = ""
 
+    /**
+     * Refresh the seller inventory once for every fresh app process. My Orders
+     * and release details can then use a current local snapshot even before the
+     * seller opens My Store.
+     */
+    fun refreshInventoryOnAppOpen(token: String) {
+        storeToken = token
+        storeController.refresh(token, force = true)
+    }
+
     fun fetchStoreInventory(token: String, sort: String = "listed", sortOrder: String = "desc") {
         invalidateNavigationRequests()
         storeToken = token
@@ -393,7 +403,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         storeController.setQuery(requested.text, requested.sort, requested.order)
         val saved = storeController.state.value
         _uiState.value = if (saved.query == requested) saved.toStoreUiState()
-            else ReleaseUiState.StoreSuccess(emptyList(), saved.totalItems, false, "Loading saved inventory…")
+        else ReleaseUiState.StoreSuccess(emptyList(), saved.totalItems, false, "Loading saved inventory…")
         storeObservationJob = viewModelScope.launch {
             storeController.state.collect { savedInventory ->
                 if (navigation == navigationRequestGeneration &&
@@ -403,7 +413,9 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                 }
             }
         }
-        // Refresh a stale snapshot once when opening the store; typing and sorting stay local.
+        // Refresh the snapshot when My Store is opened. The repository only
+        // suppresses a request when the same app session just refreshed it, so
+        // reopening the store no longer leaves an old five-minute snapshot around.
         storeController.refresh(token, force = false)
     }
 
@@ -597,7 +609,7 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
                         )
 
                     if (response.isSuccessful || response.code() == 404) {
-                    localRepository.removeLocalListing(listingId)
+                        localRepository.removeLocalListing(listingId)
                         deletedIds += listingId
                         // The store observes this confirmed deletion from the local database.
                     } else {

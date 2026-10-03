@@ -15,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Rule
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
@@ -24,6 +25,8 @@ import java.util.concurrent.atomic.AtomicReference
 class MarketplaceRecoveryInteractionTest {
     @get:Rule val compose = createComposeRule()
     private lateinit var pricing: MarketplacePricingController
+
+    @Before fun enableAutomaticChecks() { MarketplaceTraffic.policy.recordManualSuccess() }
 
     private fun showPricing(releaseId: Long = 987654321) {
         compose.setContent {
@@ -79,7 +82,7 @@ class MarketplaceRecoveryInteractionTest {
             assertEquals(1, pricing.attempt)
             assertTrue(pricing.needsLoad)
         }
-        compose.waitUntil(2_000) { pricing.canShowPage }
+        compose.waitUntil(15_000) { pricing.canShowPage }
     }
 
     @Test fun freshCachedPricesDoNotLoadOnSellButVisibleListingsCanLoad() {

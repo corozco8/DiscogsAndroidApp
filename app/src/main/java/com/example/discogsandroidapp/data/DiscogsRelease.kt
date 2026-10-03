@@ -36,18 +36,24 @@ data class PriceSuggestions(
     @SerialName("Fair (F)") val fair: PriceSuggestionValue? = null,
     @SerialName("Poor (P)") val poor: PriceSuggestionValue? = null
 ) {
-    // 1. Gather all non-null pricing values and sort them from lowest to highest
+    // Gather only usable USD guide values. This keeps the Low / Median / High
+    // fallback card from silently treating an invalid or non-USD suggestion as
+    // a dollar amount.
     private val allValues: List<Double>
-        get() = listOfNotNull(
-            poor?.value,
-            fair?.value,
-            good?.value,
-            goodPlus?.value,
-            veryGood?.value,
-            veryGoodPlus?.value,
-            nearMint?.value,
-            mint?.value
-        ).sorted()
+        get() = listOf(
+            poor,
+            fair,
+            good,
+            goodPlus,
+            veryGood,
+            veryGoodPlus,
+            nearMint,
+            mint
+        ).mapNotNull { suggestion ->
+            val value = suggestion?.value?.takeIf { it.isFinite() && it > 0.0 }
+            val isUsd = suggestion?.currency?.equals("USD", ignoreCase = true) ?: true
+            value?.takeIf { isUsd }
+        }.sorted()
 
     // 2. Grab the absolute minimum value
     val low: Double? get() = allValues.firstOrNull()
@@ -88,16 +94,20 @@ data class PriceSuggestions(
 }
 
 private const val MIN_TRUSTED_LIVE_LISTINGS = 2
+private const val FALLBACK_GRADE_STEP_RATIO = 0.78
+private const val FALLBACK_EXACT_HIGH_TRUST_RATIO = 1.35
+private const val FALLBACK_EXACT_HIGH_REJECT_RATIO = 2.00
+private const val FALLBACK_EXACT_LOW_TRUST_RATIO = 0.60
+private const val FALLBACK_EXACT_LOW_REJECT_RATIO = 0.45
 
-/** Median of the comparable asks in the retrieved sample, not the whole marketplace. */
-internal fun medianComparableAskingPrice(
+/** Lowest qualifying ask in the retrieved sample, not the whole marketplace. */
+internal fun lowestComparableAskingPrice(
     prices: List<Double>,
     minimumListingCount: Int = MIN_TRUSTED_LIVE_LISTINGS
 ): Double? {
-    val valid = prices.filter { it.isFinite() && it > 0.0 }.sorted()
+    val valid = prices.filter { it.isFinite() && it > 0.0 }
     if (valid.size < minimumListingCount) return null
-    val middle = valid.size / 2
-    return if (valid.size % 2 == 1) valid[middle] else valid[middle - 1] / 2.0 + valid[middle] / 2.0
+    return valid.minOrNull()
 }
 
 data class ReleasePriceSummary(
@@ -137,7 +147,7 @@ data class ReleasePriceSummary(
     val isAlbumRelease: Boolean = true
 ) {
     /**
-     * Median comparable asking price for the selected media grade in our first-page sample.
+     * Lowest qualifying asking price for the selected media grade in our first-page sample.
      *
      * Normal recommendation rules:
      * - M / NM: ignore marketplace copies with G+ or worse sleeves.
@@ -187,13 +197,8 @@ data class ReleasePriceSummary(
             minimumRecommendedSleeveRankFor(targetCondition)
 
         fun rawMediaPrice(): Double? {
-            if (!sleeveCondition.isNullOrBlank()) {
-                activeMediaSleevePriceSamples["$condition||$sleeveCondition"]?.let { samples ->
-                    medianComparableAskingPrice(samples, minimumListingCount)?.let { return roundPrice(it) }
-                }
-            }
             activeMediaPriceSamples[condition]?.let { samples ->
-                return medianComparableAskingPrice(samples, minimumListingCount)?.let(::roundPrice)
+                return lowestComparableAskingPrice(samples, minimumListingCount)?.let(::roundPrice)
             }
             val comparableCount = activeMediaListingCounts[condition] ?: 0
             if (comparableCount < minimumListingCount) return null
@@ -203,8 +208,7 @@ data class ReleasePriceSummary(
                 ?.let(::roundPrice)
         }
 
-        // Non-albums do not exclude low-grade or generic sleeves. Exact sleeve
-        // samples are still preferred when present; otherwise use the media grade.
+        // Non-albums do not exclude low-grade or generic sleeves; compare media grade.
         // The caller controls the comparable count; observed prices still require two.
         if (!isAlbumRelease || minimumSleeveRank == null) {
             return rawMediaPrice()
@@ -227,16 +231,10 @@ data class ReleasePriceSummary(
         }
 
         val prefix = "$condition||"
-        val exactKey = "$condition||$sleeveCondition"
-        if (!sleeveCondition.isNullOrBlank()) {
-            activeMediaSleevePriceSamples[exactKey]?.let { samples ->
-                medianComparableAskingPrice(samples, minimumListingCount)?.let { return roundPrice(it) }
-            }
-        }
         val qualifyingSamples = activeMediaSleevePriceSamples.filterKeys { key ->
             key.startsWith(prefix) && (sleeveGradeRank(key.removePrefix(prefix)) ?: -1) >= minimumSleeveRank
         }.values.flatten()
-        if (qualifyingSamples.isNotEmpty()) return medianComparableAskingPrice(qualifyingSamples, minimumListingCount)?.let(::roundPrice)
+        if (qualifyingSamples.isNotEmpty()) return lowestComparableAskingPrice(qualifyingSamples, minimumListingCount)?.let(::roundPrice)
         var qualifyingCount = 0
         var lowestQualifyingPrice: Double? = null
 
@@ -283,17 +281,17 @@ data class ReleasePriceSummary(
         val ratios = listOf(1.0, 0.60, 0.36)
         val target = grades.indexOf(condition)
         if (target < 0 || currentListingPriceFor(condition, sleeveCondition) != null) return null
+        // A single matching ask is more relevant than extrapolating another grade.
+        // Keep the weaker comparison labelled as an estimate.
+        comparableListingPriceFor(condition, condition, sleeveCondition, 1)?.let { price ->
+            if (conflictsWithHigherGrade(condition, sleeveCondition, price, 1)) return null
+            return LiveGradeEstimate(price, condition, price)
+        }
         // Prefer evidence from at least two listings. Only when none exists do we
         // accept a single qualifying listing, still returned as an estimate.
         val minimumListingCount = if (grades.any { grade ->
                 comparableListingPriceFor(grade, condition, sleeveCondition) != null
             }) MIN_TRUSTED_LIVE_LISTINGS else 1
-        if (minimumListingCount == 1) {
-            comparableListingPriceFor(condition, condition, sleeveCondition, 1)?.let { price ->
-                if (conflictsWithHigherGrade(condition, sleeveCondition, price, 1)) return null
-                return LiveGradeEstimate(price, condition, price)
-            }
-        }
         // Fill a missing grade between available asks, using the same target sleeve policy.
         val better = (target - 1 downTo 0).firstNotNullOfOrNull { index ->
             comparableListingPriceFor(grades[index], condition, sleeveCondition, minimumListingCount)?.let { Triple(index, grades[index], it) }
@@ -319,21 +317,24 @@ data class ReleasePriceSummary(
         return null
     }
 
-    /** Grade-specific API estimate with a small, explicit sleeve adjustment. */
+    /** Robust API estimate with a small, explicit sleeve adjustment. */
     fun fallbackRecommendedPriceFor(
         condition: String,
         sleeveCondition: String? = null
     ): Double? {
         val gradePrice = apiRecommendationFor(condition) ?: return null
-        // Seller heuristic: VG+ sleeve is neutral; avoid the old 2x–5x grade multipliers.
+        // VG+ remains neutral. Very damaged album jackets get a materially larger
+        // deduction than the old 20-25% haircut, which badly overvalued P/F covers.
         val sleeveMultiplier = if (!isAlbumRelease) 1.0 else when (sleeveCondition) {
             "Mint (M)" -> 1.10
             "Near Mint (NM or M-)" -> 1.05
+            "Very Good Plus (VG+)" -> 1.00
             "Very Good (VG)" -> 0.95
             "Good Plus (G+)" -> 0.90
-            "Good (G)" -> 0.85
-            "Fair (F)" -> 0.80
-            "Poor (P)", "No Cover" -> 0.75
+            "Good (G)" -> 0.75
+            "Fair (F)" -> 0.55
+            "Poor (P)" -> 0.30
+            "No Cover" -> 0.25
             else -> 1.0
         }
         return roundPrice(gradePrice * sleeveMultiplier).takeIf { it.isFinite() && it > 0.0 }
@@ -429,21 +430,147 @@ data class ReleasePriceSummary(
         // All listing inputs are USD. Never silently interpret another currency as dollars.
         if (!currency.equals("USD", ignoreCase = true)) return null
         val points = priceSuggestions?.conditionPricePoints().orEmpty()
-        points.firstOrNull { it.first == targetRank }?.let { return roundPrice(it.second) }
+        if (points.isEmpty()) {
+            // The historical price-guide median is still a last-resort anchor when
+            // Discogs returns no usable condition suggestions at all. Treat it as
+            // roughly VG+ and use the gentler 78% grade curve.
+            val anchor = median?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+            return projectFallbackGrade(anchor, sourceRank = 5, targetRank = targetRank)
+                .let(::roundPrice)
+                .takeIf { it.isFinite() && it > 0.0 }
+        }
+
+        val exact = points.firstOrNull { it.first == targetRank }?.second
         val lower = points.lastOrNull { it.first < targetRank }
         val upper = points.firstOrNull { it.first > targetRank }
-        val estimate = if (lower != null && upper != null) {
-            if (upper.second < lower.second) return null
-            val fraction = (targetRank - lower.first).toDouble() / (upper.first - lower.first)
-            lower.second * (1.0 - fraction) + upper.second * fraction
-        } else {
-            // With only one side available, retain the existing 60% per grade-step heuristic.
-            // A price-guide median is used only if there are no valid condition suggestions.
-            val anchor = lower ?: upper ?: median?.takeIf { it.isFinite() && it > 0.0 }
-                ?.let { 5 to it } ?: return null
-            anchor.second * Math.pow(0.60, (anchor.first - targetRank).toDouble())
+
+        // If the exact grade is missing and Discogs gives coherent values on both
+        // sides, use release-specific interpolation before a generic grade ratio.
+        if (exact == null && lower != null && upper != null) {
+            if (upper.second < lower.second) {
+                // With only contradictory anchors there is no defensible curve.
+                if (points.size <= 2) return null
+            } else {
+                val fraction =
+                    (targetRank - lower.first).toDouble() / (upper.first - lower.first)
+                val interpolated =
+                    lower.second * (1.0 - fraction) + upper.second * fraction
+
+                // When several other grades are available, guard the local pair
+                // against another hidden spike before accepting the interpolation.
+                val projectedConsensus = fallbackPeerConsensus(points, targetRank, null)
+                val guarded = if (projectedConsensus != null) {
+                    val ratio = interpolated / projectedConsensus
+                    if (ratio !in 0.50..1.75) projectedConsensus else interpolated
+                } else {
+                    interpolated
+                }
+
+                return roundPrice(guarded).takeIf { it.isFinite() && it > 0.0 }
+            }
         }
+
+        val peerConsensus = fallbackPeerConsensus(points, targetRank, exact)
+
+        // Missing grades use the robust consensus projected from every usable
+        // neighboring grade. This replaces the old 60% per-step extrapolation.
+        if (exact == null) {
+            val estimate = peerConsensus ?: return null
+            return roundPrice(estimate).takeIf { it.isFinite() && it > 0.0 }
+        }
+
+        // A lone exact suggestion is still the best evidence available. Once other
+        // grades exist, however, compare it with their reconstructed target value so
+        // a single stale/high historical sale cannot dominate the recommendation.
+        if (peerConsensus == null) {
+            return roundPrice(exact).takeIf { it.isFinite() && it > 0.0 }
+        }
+
+        val exactToConsensus = exact / peerConsensus
+        val estimate = when {
+            exactToConsensus in FALLBACK_EXACT_LOW_TRUST_RATIO..FALLBACK_EXACT_HIGH_TRUST_RATIO -> exact
+
+            exactToConsensus >= FALLBACK_EXACT_HIGH_REJECT_RATIO -> peerConsensus
+
+            exactToConsensus > FALLBACK_EXACT_HIGH_TRUST_RATIO -> {
+                // Smoothly reduce the exact value's influence from 100% at 1.35x
+                // to 0% at 2x. There is no abrupt price cliff near the threshold.
+                val correction =
+                    ((exactToConsensus - FALLBACK_EXACT_HIGH_TRUST_RATIO) /
+                            (FALLBACK_EXACT_HIGH_REJECT_RATIO - FALLBACK_EXACT_HIGH_TRUST_RATIO))
+                        .coerceIn(0.0, 1.0)
+                exact * (1.0 - correction) + peerConsensus * correction
+            }
+
+            exactToConsensus <= FALLBACK_EXACT_LOW_REJECT_RATIO -> peerConsensus
+
+            else -> {
+                // Be a little more tolerant of unexpectedly cheap historical data,
+                // while still protecting against a catastrophic low outlier.
+                val correction =
+                    ((FALLBACK_EXACT_LOW_TRUST_RATIO - exactToConsensus) /
+                            (FALLBACK_EXACT_LOW_TRUST_RATIO - FALLBACK_EXACT_LOW_REJECT_RATIO))
+                        .coerceIn(0.0, 1.0)
+                exact * (1.0 - correction) + peerConsensus * correction
+            }
+        }
+
         return roundPrice(estimate).takeIf { it.isFinite() && it > 0.0 }
+    }
+
+    /**
+     * Re-express every other Discogs condition suggestion as an equivalent price
+     * for [targetRank], then use a median so one wild condition does not drag the
+     * whole release upward. The optional exact value is excluded on purpose: it
+     * is the observation being validated.
+     */
+    private fun fallbackPeerConsensus(
+        points: List<Pair<Int, Double>>,
+        targetRank: Int,
+        exactValue: Double?
+    ): Double? {
+        val projected = points.mapNotNull { (rank, value) ->
+            if (rank == targetRank && exactValue != null) return@mapNotNull null
+            projectFallbackGrade(value, sourceRank = rank, targetRank = targetRank)
+                .takeIf { it.isFinite() && it > 0.0 }
+        }
+
+        if (projected.isEmpty()) return null
+
+        val firstMedian = medianValue(projected) ?: return null
+        if (projected.size < 3) return firstMedian
+
+        // Remove peer estimates that are themselves extreme relative to the
+        // group, then take the median again. This makes the consensus robust even
+        // when Discogs has more than one noisy condition value.
+        val trimmed = projected.filter { candidate ->
+            val ratio = candidate / firstMedian
+            ratio in 0.50..2.00
+        }
+
+        return medianValue(trimmed.takeIf { it.size >= 2 } ?: projected)
+    }
+
+    private fun projectFallbackGrade(
+        value: Double,
+        sourceRank: Int,
+        targetRank: Int
+    ): Double {
+        return value * Math.pow(
+            FALLBACK_GRADE_STEP_RATIO,
+            (sourceRank - targetRank).toDouble()
+        )
+    }
+
+    private fun medianValue(values: List<Double>): Double? {
+        val sorted = values.filter { it.isFinite() && it > 0.0 }.sorted()
+        if (sorted.isEmpty()) return null
+        val middle = sorted.size / 2
+        return if (sorted.size % 2 == 1) {
+            sorted[middle]
+        } else {
+            (sorted[middle - 1] + sorted[middle]) / 2.0
+        }
     }
 
     private fun conditionRank(

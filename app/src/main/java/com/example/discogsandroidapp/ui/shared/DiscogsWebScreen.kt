@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -147,13 +148,19 @@ fun DiscogsWebScreen(
                 }
             },
             update = { view ->
+                // Compose may run this block repeatedly. Keep network navigation
+                // outside AndroidView.update so recomposition cannot reload Discogs.
                 webView = view
-                if (requestedUrl[0] != url) {
-                    requestedUrl[0] = url
-                    view.loadUrl(url)
-                }
             }
         )
+    }
+
+    LaunchedEffect(url, webView) {
+        val view = webView ?: return@LaunchedEffect
+        if (requestedUrl[0] != url) {
+            requestedUrl[0] = url
+            view.loadUrl(url)
+        }
     }
 }
 

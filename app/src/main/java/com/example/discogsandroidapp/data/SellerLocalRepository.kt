@@ -70,7 +70,12 @@ class SellerLocalRepository(context: Context) {
 
             if (!force) {
                 val lastSync = dao.getSyncState(INVENTORY_SYNC_KEY)?.lastSuccessfulSyncAtEpochMs ?: 0L
-                if (System.currentTimeMillis() - lastSync in 0 until 5 * 60_000L) return@withLock
+                // My Store is expected to be nearly live. Keep only a short
+                // coalescing window so opening the page soon after app startup
+                // does not immediately download all inventory pages twice.
+                if (System.currentTimeMillis() - lastSync in 0 until INVENTORY_OPEN_REFRESH_DEBOUNCE_MS) {
+                    return@withLock
+                }
             }
             val generation = inventoryCommitMutex.withLock { inventoryGeneration }
             val authHeader = "Discogs token=$token"
@@ -198,30 +203,30 @@ class SellerLocalRepository(context: Context) {
             // network page has succeeded. A failed/partial sync leaves the previous
             // valid local snapshot untouched.
             inventoryCommitMutex.withLock {
-            // Inventory pages can lag behind the confirmed individual listing.
-            // Keep recent creations until the feed includes them (bounded to ten minutes).
-            val observedIds = completeSnapshot.map { it.listingId }.toSet()
-            val commitTime = System.currentTimeMillis()
-            recentlyCreatedListings.entries.removeAll { it.key in observedIds || commitTime - it.value > 10 * 60_000 }
-            val changedIds = inventoryChanges.filterValues { it > generation }.keys + recentlyCreatedListings.keys
-            val latest = if (changedIds.isEmpty()) emptyList() else dao.getInventorySnapshot().filter { it.listingId in changedIds }
-            val mergedSnapshot = completeSnapshot.filterNot { it.listingId in changedIds } +
-                latest.map { it.copy(lastSeenAtEpochMs = syncStartedAt) }
-            dao.replaceInventorySnapshot(
-                listings = mergedSnapshot,
-                syncStartedAtEpochMs = syncStartedAt
-            )
-
-            dao.upsertSyncState(
-                LocalSyncStateEntity(
-                    key = INVENTORY_SYNC_KEY,
-                    lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
-                    itemCount = mergedSnapshot.size,
-                    note = "Active For Sale inventory"
+                // Inventory pages can lag behind the confirmed individual listing.
+                // Keep recent creations until the feed includes them (bounded to ten minutes).
+                val observedIds = completeSnapshot.map { it.listingId }.toSet()
+                val commitTime = System.currentTimeMillis()
+                recentlyCreatedListings.entries.removeAll { it.key in observedIds || commitTime - it.value > 10 * 60_000 }
+                val changedIds = inventoryChanges.filterValues { it > generation }.keys + recentlyCreatedListings.keys
+                val latest = if (changedIds.isEmpty()) emptyList() else dao.getInventorySnapshot().filter { it.listingId in changedIds }
+                val mergedSnapshot = completeSnapshot.filterNot { it.listingId in changedIds } +
+                        latest.map { it.copy(lastSeenAtEpochMs = syncStartedAt) }
+                dao.replaceInventorySnapshot(
+                    listings = mergedSnapshot,
+                    syncStartedAtEpochMs = syncStartedAt
                 )
-            )
-            inventoryChanges.clear()
-        }
+
+                dao.upsertSyncState(
+                    LocalSyncStateEntity(
+                        key = INVENTORY_SYNC_KEY,
+                        lastSuccessfulSyncAtEpochMs = System.currentTimeMillis(),
+                        itemCount = mergedSnapshot.size,
+                        note = "Active For Sale inventory"
+                    )
+                )
+                inventoryChanges.clear()
+            }
         }
 
     suspend fun syncRecentOrders(
@@ -449,6 +454,7 @@ class SellerLocalRepository(context: Context) {
 
         const val INVENTORY_SYNC_KEY = "inventory"
         const val ORDERS_SYNC_KEY = "orders"
+        private const val INVENTORY_OPEN_REFRESH_DEBOUNCE_MS = 30_000L
 
         fun parseDiscogsDate(value: String?): Long? {
             if (value.isNullOrBlank()) {

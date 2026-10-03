@@ -29,6 +29,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.discogsandroidapp.network.DiscogsApiTraffic
 import com.example.discogsandroidapp.pricing.MarketplaceTrafficReport
+import com.example.discogsandroidapp.pricing.MarketplaceTraffic
 import kotlinx.coroutines.delay
 
 /** Small traffic counter. Its local report never makes a network request. */
@@ -53,7 +54,7 @@ internal fun ApiRequestCounter(modifier: Modifier = Modifier) {
         modifier = modifier.semantics {
             contentDescription = "$count API requests from this app in the last 60 seconds"
         }.clickable {
-            report = MarketplaceTrafficReport.log.report(requests.count.value)
+            report = MarketplaceTrafficReport.log.report(requests.count.value, MarketplaceTraffic.policy.automaticChecksSuspended)
             showReport = true
         }
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(3.dp))
@@ -64,7 +65,7 @@ internal fun ApiRequestCounter(modifier: Modifier = Modifier) {
     if (showReport) {
         LaunchedEffect(Unit) {
             while (true) {
-                report = MarketplaceTrafficReport.log.report(requests.count.value)
+                report = MarketplaceTrafficReport.log.report(requests.count.value, MarketplaceTraffic.policy.automaticChecksSuspended)
                 delay(1_000)
             }
         }

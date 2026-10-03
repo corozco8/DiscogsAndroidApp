@@ -40,7 +40,7 @@ internal class MarketplaceTrafficLog(private val now: () -> Long = System::curre
         events.addLast("${java.time.Instant.ofEpochMilli(now())} $detail")
         while (events.size > 40) events.removeFirst()
     }
-    @Synchronized fun report(apiCount: Int): String {
+    @Synchronized fun report(apiCount: Int, automaticChecksSuspended: Boolean = false): String {
         prune(recentLoads); prune(recentResources)
         return buildString {
             appendLine("API requests in last 60 seconds: $apiCount")
@@ -49,6 +49,7 @@ internal class MarketplaceTrafficLog(private val now: () -> Long = System::curre
             appendLine("Browser resource requests observed: $resources total, ${recentResources.size} in last 60 seconds")
             appendLine("Resource observations may include browser cache hits; they are not a server quota counter.")
             appendLine("Marketplace errors: $errors")
+            appendLine("Automatic live checks: " + if (automaticChecksSuspended) "paused until a successful manual check" else "enabled")
             appendLine("Counts cover this app session only. Successful pages/prices stay fresh for 15 minutes.")
             hosts.entries.sortedByDescending { it.value }.forEach { appendLine("${it.key}: ${it.value}") }
             appendLine("\nRecent page activity:")

@@ -130,8 +130,13 @@ internal fun ReleaseSearchField(
                 properties = PopupProperties(focusable = false, usePlatformDefaultWidth = false)
             ) {
                 Surface(
-                    modifier = Modifier.width(with(density) { windowSize.width.toDp() })
-                        .heightIn(max = minOf(340.dp, availableHeight)).testTag("Search suggestions"),
+                    modifier = Modifier
+                        .width(with(density) { windowSize.width.toDp() })
+                        .then(
+                            if (showHistory) Modifier.height(availableHeight)
+                            else Modifier.heightIn(max = minOf(340.dp, availableHeight))
+                        )
+                        .testTag("Search suggestions"),
                     shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp),
                     tonalElevation = 3.dp,
                     shadowElevation = 8.dp

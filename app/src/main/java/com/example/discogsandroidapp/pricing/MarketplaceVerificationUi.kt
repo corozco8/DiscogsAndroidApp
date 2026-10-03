@@ -23,17 +23,30 @@ internal fun MarketplacePricingWebView(
 ) {
     AndroidView(
         modifier = modifier,
-        factory = { FrameLayout(it) },
-        update = { host ->
-            val page = pricing.createWebView(host.context, hidden)
-            if (page.parent !== host) {
+        factory = { context ->
+            // Important: create/attach the Discogs page only when AndroidView is created.
+            // Compose may call `update` many times during recomposition, so network page
+            // creation must never live in the update block.
+            FrameLayout(context).apply {
+                val page = pricing.createWebView(context, hidden)
                 (page.parent as? ViewGroup)?.removeView(page)
-                host.addView(page, FrameLayout.LayoutParams(
+                addView(page, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 ))
             }
         },
-        onRelease = { it.removeAllViews() }
+        update = { host ->
+            // Recomposition is allowed to change presentation only. This method cannot
+            // create a WebView or call loadUrl(), so state changes cannot generate extra
+            // marketplace requests.
+            val page = host.getChildAt(0) as? android.webkit.WebView
+            pricing.updateWebViewVisibility(page, hidden)
+        },
+        onRelease = { host ->
+            val page = host.getChildAt(0) as? android.webkit.WebView
+            host.removeAllViews()
+            page?.let(pricing::onPageDetached)
+        }
     )
 }
 
@@ -95,6 +108,7 @@ internal fun ListingPricingNotice(
         MarketplaceUiPriceStatus.NO_MATCH -> "No matching live prices"
         MarketplaceUiPriceStatus.BLOCKED -> "Marketplace access blocked"
         MarketplaceUiPriceStatus.PARTIAL -> "Some listings could not be read"
+        MarketplaceUiPriceStatus.AUTOMATIC_PAUSED -> "Automatic live checks paused"
         else -> "Live prices unavailable"
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -105,7 +119,7 @@ internal fun ListingPricingNotice(
             TextButton(onClick = onVerify, enabled = enabled) { Text("Verify Discogs") }
         } else if (info.status != MarketplaceUiPriceStatus.LOADING && onRefresh != null) {
             TextButton(onClick = onRefresh, enabled = enabled) {
-                Text("Refresh prices")
+                Text(if (info.status == MarketplaceUiPriceStatus.AUTOMATIC_PAUSED) "Check live price" else "Refresh prices")
             }
         }
     }

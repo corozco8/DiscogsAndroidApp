@@ -84,7 +84,7 @@ internal fun ReleaseDetails(
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(showSellDialog, pricing.ready) {
-        if (showSellDialog) pricing.requestSellPrices()
+        if (showSellDialog) pricing.requestSellPrices() else pricing.cancelAutomaticCheck()
     }
     LaunchedEffect(showSellDialog, isSubmittingListing, pricing.status) {
         if (showSellDialog && !isSubmittingListing) pricing.openVerification(automatic = true)
@@ -961,7 +961,7 @@ fun SalesRangeCard(
     onListingsClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val guide = priceGuideValues(summary, livePrices, pricingInfo)
+    val guide = priceGuideValues(summary, livePrices, pricingInfo, haveCount, wantCount)
     fun formatPrice(price: Double?): String {
         return if (price != null && price > 0.0) "$${String.format(java.util.Locale.getDefault(), "%.2f", price)}" else "N/A"
     }

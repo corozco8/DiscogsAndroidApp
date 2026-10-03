@@ -9,46 +9,46 @@ class ComparablePriceRecommendationTest {
     private val nm = "Near Mint (NM or M-)"
     private val mint = "Mint (M)"
 
-    @Test fun medianDoesNotRecommendTheCheapestOrMostExpensiveOutlier() {
+    @Test fun lowestQualifyingAskWinsOverTheMedian() {
         val summary = ReleasePriceSummary(isAlbumRelease = false,
             activeMediaPriceSamples = mapOf(vgp to listOf(1.0, 18.0, 20.0, 22.0, 100.0)))
-        assertEquals(20.0, summary.recommendedPriceFor(vgp)!!, 0.0)
+        assertEquals(1.0, summary.recommendedPriceFor(vgp)!!, 0.0)
     }
 
-    @Test fun exactMediaAndSleeveMatchesWinOverOtherSleeves() {
+    @Test fun cheaperEligibleSleeveWinsOverAnExactSleeveMatch() {
         val summary = ReleasePriceSummary(activeMediaSleevePriceSamples = mapOf(
-            "$vgp||$vgp" to listOf(18.0, 20.0),
-            "$vgp||$nm" to listOf(30.0, 40.0),
+            "$vgp||$vgp" to listOf(30.0, 40.0),
+            "$vgp||$vg" to listOf(18.0, 20.0),
             "$vgp||Poor (P)" to listOf(0.50, 1.0)))
-        assertEquals(19.0, summary.currentListingPriceFor(vgp, vgp)!!, 0.0)
+        assertEquals(18.0, summary.currentListingPriceFor(vgp, vgp)!!, 0.0)
     }
 
-    @Test fun insufficientExactMatchesPoolEligibleSleevesAndWeightEveryListing() {
+    @Test fun lowestEligibleAskExcludesPoorSleeves() {
         val summary = ReleasePriceSummary(activeMediaSleevePriceSamples = mapOf(
             "$vgp||$vgp" to listOf(18.0),
             "$vgp||$nm" to listOf(20.0, 22.0, 24.0),
             "$vgp||Good (G)" to listOf(1.0, 2.0)))
-        assertEquals(21.0, summary.currentListingPriceFor(vgp, vgp)!!, 0.0)
+        assertEquals(18.0, summary.currentListingPriceFor(vgp, vgp)!!, 0.0)
     }
 
     @Test fun invalidSamplesAndOneComparableCannotCreateALiveRecommendation() {
-        assertNull(medianComparableAskingPrice(listOf(Double.NaN, Double.POSITIVE_INFINITY, -1.0, 0.0, 10.0)))
-        assertEquals(15.0, medianComparableAskingPrice(listOf(10.0, 20.0, Double.NaN))!!, 0.0)
+        assertNull(lowestComparableAskingPrice(listOf(Double.NaN, Double.POSITIVE_INFINITY, -1.0, 0.0, 10.0)))
+        assertEquals(10.0, lowestComparableAskingPrice(listOf(10.0, 20.0, Double.NaN))!!, 0.0)
         val summary = ReleasePriceSummary(isAlbumRelease = false,
             activeMediaPriceSamples = mapOf(vgp to listOf(10.0)),
             activeMediaListingCounts = mapOf(vgp to 10), activeMediaLowestPrices = mapOf(vgp to 1.0))
         assertNull(summary.currentListingPriceFor(vgp))
     }
 
-    @Test fun aDeliberatelyPoorSleeveCanUseExactPoorSleeveComparables() {
+    @Test fun aDeliberatelyPoorSleeveRestoresTheLowestMediaPrice() {
         val summary = ReleasePriceSummary(activeMediaPriceSamples = mapOf(vgp to listOf(1.0, 20.0, 30.0)),
             activeMediaSleevePriceSamples = mapOf("$vgp||No Cover" to listOf(8.0, 10.0)))
-        assertEquals(9.0, summary.currentListingPriceFor(vgp, "No Cover")!!, 0.0)
+        assertEquals(1.0, summary.currentListingPriceFor(vgp, "No Cover")!!, 0.0)
     }
 
-    @Test fun missingVgPlusInterpolatesMedianLiveAnchors() {
+    @Test fun missingVgPlusInterpolatesLowestLiveAnchors() {
         val summary = ReleasePriceSummary(isAlbumRelease = false, activeMediaPriceSamples = mapOf(
-            nm to listOf(1.0, 20.0, 100.0), vg to listOf(0.50, 8.0, 50.0)))
+            nm to listOf(20.0, 30.0, 100.0), vg to listOf(8.0, 10.0, 50.0)))
         assertEquals(14.0, summary.recommendedPriceFor(vgp)!!, 0.0)
     }
 
@@ -131,13 +131,13 @@ class ComparablePriceRecommendationTest {
         assertEquals(vg, estimate.secondSourceCondition)
     }
 
-    @Test fun multipleComparablesBeatALoneMatchingOrCloserGradeListing() {
+    @Test fun aLoneMatchingListingWinsOverAnEstimateFromAnotherGrade() {
         val summary = ReleasePriceSummary(isAlbumRelease = false,
             activeMediaPriceSamples = mapOf(vg to listOf(8.0, 10.0), vgp to listOf(12.0), nm to listOf(30.0)))
-        assertEquals(25.0, summary.liveGradeEstimateFor(nm)!!.price, 0.0)
-        assertEquals(vg, summary.liveGradeEstimateFor(nm)!!.sourceCondition)
-        assertEquals(15.0, summary.liveGradeEstimateFor(vgp)!!.price, 0.0)
-        assertEquals(9.0, summary.currentListingPriceFor(vg)!!, 0.0)
+        assertEquals(30.0, summary.liveGradeEstimateFor(nm)!!.price, 0.0)
+        assertEquals(nm, summary.liveGradeEstimateFor(nm)!!.sourceCondition)
+        assertEquals(12.0, summary.liveGradeEstimateFor(vgp)!!.price, 0.0)
+        assertEquals(8.0, summary.currentListingPriceFor(vg)!!, 0.0)
     }
 
     @Test fun singleListingFallbackStillRejectsPoorAlbumSleeves() {

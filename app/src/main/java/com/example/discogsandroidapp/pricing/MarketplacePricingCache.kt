@@ -10,7 +10,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 
-enum class MarketplaceUiPriceStatus { IDLE, LOADING, CACHED, FRESH, PARTIAL, NO_MATCH, FAILED, BLOCKED, VERIFICATION_REQUIRED, RATE_LIMITED, NETWORK, UNREADABLE, TIMEOUT }
+enum class MarketplaceUiPriceStatus { IDLE, LOADING, CACHED, FRESH, PARTIAL, NO_MATCH, FAILED, BLOCKED, VERIFICATION_REQUIRED, RATE_LIMITED, NETWORK, UNREADABLE, TIMEOUT, AUTOMATIC_PAUSED }
 
 @Serializable
 data class MarketplacePriceSnapshot(

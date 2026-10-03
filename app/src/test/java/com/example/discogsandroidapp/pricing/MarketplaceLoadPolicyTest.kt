@@ -43,4 +43,23 @@ class MarketplaceLoadPolicyTest {
         clock++
         assertTrue(policy.reserveLoad())
     }
+
+    @Test fun aBlockSuspendsAutomaticChecksWithoutATimerOrManualLockout() {
+        policy.recordBlock()
+        clock += 86_400_000L
+        assertTrue(policy.automaticChecksSuspended)
+        assertFalse(policy.reserveLoad())
+        assertTrue(policy.reserveLoad(explicit = true))
+        assertTrue(policy.automaticChecksSuspended)
+    }
+
+    @Test fun aSuccessfulManualCheckResumesAutomaticChecksWithNormalSpacing() {
+        policy.recordBlock()
+        assertTrue(policy.reserveLoad(explicit = true))
+        policy.recordManualSuccess()
+        assertFalse(policy.automaticChecksSuspended)
+        assertFalse(policy.reserveLoad())
+        clock += 10_000L
+        assertTrue(policy.reserveLoad())
+    }
 }

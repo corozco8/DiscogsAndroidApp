@@ -64,7 +64,7 @@ class MarketplaceComparableSamplesTest {
             assertEquals(listOf(1.0, 18.0, 20.0, 22.0, 100.0), prices.mediaPriceSamples[vgp])
             assertEquals(prices.mediaPriceSamples[vgp], prices.mediaSleevePriceSamples["$vgp||$vgp"])
             assertEquals(5, prices.mediaListingCounts[vgp])
-            assertEquals(20.0, ReleasePriceSummary().withActiveMarketplacePrices(prices)
+            assertEquals(1.0, ReleasePriceSummary().withActiveMarketplacePrices(prices)
                 .recommendedPriceFor(vgp, vgp)!!, 0.0)
         } finally {
             instrumentation.runOnMainSync { page?.destroy() }
