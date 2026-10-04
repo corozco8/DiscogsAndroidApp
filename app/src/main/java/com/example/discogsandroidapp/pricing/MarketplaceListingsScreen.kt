@@ -1,6 +1,7 @@
 package com.example.discogsandroidapp.pricing
 
 import com.example.discogsandroidapp.data.ReleasePriceSummary
+import com.example.discogsandroidapp.debug.PricingDebugReleaseInfo
 import com.example.discogsandroidapp.releases.AddListingDialog
 import com.example.discogsandroidapp.releases.ReleaseViewModel
 import com.example.discogsandroidapp.ui.shared.keyboardInputArea
@@ -30,6 +31,8 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 internal fun MarketplaceListingsScreen(
     releaseId: Long,
     priceSummary: ReleasePriceSummary? = null,
+    algorithmPriceSummary: ReleasePriceSummary? = priceSummary,
+    pricingDebugRelease: PricingDebugReleaseInfo? = null,
     viewModel: ReleaseViewModel,
     token: String,
     onBackClick: () -> Unit,
@@ -182,6 +185,8 @@ internal fun MarketplaceListingsScreen(
     if (showSellDialog) {
         AddListingDialog(
             priceSummary = effectivePriceSummary ?: priceSummary,
+            algorithmPriceSummary = algorithmPriceSummary,
+            pricingDebugRelease = pricingDebugRelease,
             isSubmitting = isSubmittingListing,
             submissionError = listingSubmissionError,
             pricingInfo = pricing.listingInfo,

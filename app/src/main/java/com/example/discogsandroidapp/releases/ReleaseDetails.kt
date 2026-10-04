@@ -4,6 +4,8 @@ import com.example.discogsandroidapp.data.DiscogsRelease
 import com.example.discogsandroidapp.data.Price
 import com.example.discogsandroidapp.data.ReleasePriceSummary
 import com.example.discogsandroidapp.data.isAlbumFormat
+import com.example.discogsandroidapp.debug.PricingDebugReleaseInfo
+import com.example.discogsandroidapp.debug.PricingDebugRepository
 import com.example.discogsandroidapp.inventory.getShortGrade
 import com.example.discogsandroidapp.inventory.listingDescriptionForGrade
 import com.example.discogsandroidapp.pricing.ListingPricingInfo
@@ -32,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -47,6 +50,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.util.Log
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.text.KeyboardOptions
@@ -80,6 +85,17 @@ internal fun ReleaseDetails(
     val effectivePriceSummary = pricing.prices?.let {
         (priceSummary ?: ReleasePriceSummary()).withActiveMarketplacePrices(it)
     } ?: priceSummary
+    val algorithmOnlySummary = priceSummary?.copy(isAlbumRelease = release.isAlbumFormat())
+    val pricingDebugRelease = releaseId?.let { id ->
+        PricingDebugReleaseInfo(
+            releaseId = id,
+            artist = release.artists.orEmpty().mapNotNull { artist -> artist.name?.takeIf { name -> name.isNotBlank() } }.joinToString(", "),
+            title = release.title.orEmpty(),
+            year = release.year,
+            have = release.community?.have ?: 0,
+            want = release.community?.want ?: 0
+        )
+    }
     var isRefreshing by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
@@ -98,6 +114,8 @@ internal fun ReleaseDetails(
             ?: ReleasePriceSummary()).copy(
                 isAlbumRelease = release.isAlbumFormat()
             ),
+            algorithmPriceSummary = algorithmOnlySummary,
+            pricingDebugRelease = pricingDebugRelease,
             isSubmitting = isSubmittingListing,
             submissionError = listingSubmissionError,
             pricingInfo = pricing.listingInfo,
@@ -610,6 +628,8 @@ private fun ReleaseInfoSection(
 @Composable
 fun AddListingDialog(
     priceSummary: ReleasePriceSummary? = null,
+    algorithmPriceSummary: ReleasePriceSummary? = null,
+    pricingDebugRelease: PricingDebugReleaseInfo? = null,
     isSubmitting: Boolean = false,
     submissionError: String? = null,
     pricingInfo: ListingPricingInfo? = null,
@@ -640,6 +660,38 @@ fun AddListingDialog(
         "No Cover",
         "Generic"
     )
+
+    val context = LocalContext.current
+    val debugLivePrice = if (condition.isNotBlank() && condition != "Not Graded") {
+        priceSummary?.currentListingPriceFor(condition, sleeveCondition)?.takeIf { it > 0.0 }
+    } else null
+    val debugAlgorithmPrice = if (condition.isNotBlank() && condition != "Not Graded") {
+        algorithmPriceSummary?.fallbackRecommendedPriceFor(condition, sleeveCondition)?.takeIf { it > 0.0 }
+    } else null
+
+    LaunchedEffect(
+        pricingDebugRelease?.releaseId, condition, sleeveCondition,
+        debugLivePrice, debugAlgorithmPrice, pricingInfo?.usingSavedPrices
+    ) {
+        val releaseInfo = pricingDebugRelease ?: return@LaunchedEffect
+        val algorithmSummary = algorithmPriceSummary ?: return@LaunchedEffect
+        val liveSummary = priceSummary ?: return@LaunchedEffect
+        val live = debugLivePrice ?: return@LaunchedEffect
+        val algorithm = debugAlgorithmPrice ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            PricingDebugRepository.recordIfNew(
+                context = context,
+                release = releaseInfo,
+                algorithmSummary = algorithmSummary,
+                liveSummary = liveSummary,
+                mediaCondition = condition,
+                sleeveCondition = sleeveCondition.ifBlank { "(not selected)" },
+                algorithmPrice = algorithm,
+                livePrice = live,
+                usingSavedLivePrices = pricingInfo?.usingSavedPrices == true
+            )
+        }
+    }
 
     SearchAccessibleDialog(
         onDismissRequest = { if (!isSubmitting) onDismiss() },

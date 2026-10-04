@@ -64,6 +64,7 @@ sealed interface ReleaseUiState {
     object Offers : ReleaseUiState
     object SalesAnalytics : ReleaseUiState
     object CustomerHistory : ReleaseUiState
+    object PricingDebug : ReleaseUiState
     data class OrderDetails(val order: DiscogsOrder) : ReleaseUiState
     data class RatingsWebView(val username: String, val ratingType: String) : ReleaseUiState
 

@@ -75,6 +75,7 @@ import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ChevronRight
 import kotlinx.coroutines.launch
 
@@ -89,6 +90,7 @@ fun ProfileDashboard(
     onOffersClick: () -> Unit,
     onSalesAnalyticsClick: () -> Unit,
     onCustomerHistoryClick: () -> Unit,
+    onDebugClick: () -> Unit,
     onSellerRatingClick: () -> Unit,
     onBuyerRatingClick: () -> Unit
 ) {
@@ -251,6 +253,12 @@ fun ProfileDashboard(
                 title = "Customer History",
                 icon = Icons.Default.People,
                 onClick = onCustomerHistoryClick
+            )
+
+            MenuBrick(
+                title = "Debug",
+                icon = Icons.Default.BugReport,
+                onClick = onDebugClick
             )
         }
 

@@ -170,9 +170,9 @@ internal class MarketplacePricingController(
         }
         needsLoad = false
         if (!preserveResponse) webView?.stopLoading()
-        if (failure == MarketplaceUiPriceStatus.RATE_LIMITED) {
-            verificationVisible = false
-        }
+        // Do not forcibly close an already-visible Cloudflare page on a 429. The response
+        // may still contain an actionable human-verification challenge that the DOM check
+        // can recognize once the page finishes rendering.
     }
     private fun requireVerification() {
         if (status != MarketplaceUiPriceStatus.VERIFICATION_REQUIRED) {
@@ -192,7 +192,7 @@ internal class MarketplacePricingController(
     /** Polling reads the existing DOM only. It never reloads a page or clicks a challenge. */
     fun checkVerificationPage() {
         val view = webView ?: return
-        if (verificationVisible && status != MarketplaceUiPriceStatus.RATE_LIMITED) inspectPage(view)
+        if (verificationVisible) inspectPage(view)
     }
     private fun allowed(url: String?): Boolean {
         if (releaseId == null || !marketplaceUrlBelongsToRelease(url, releaseId)) return false
@@ -250,7 +250,10 @@ internal class MarketplacePricingController(
                     val challenge = response.responseHeaders?.entries?.any {
                         it.key.equals("cf-mitigated", true) && it.value.equals("challenge", true)
                     } == true
-                    if (challenge && response.statusCode != 429) requireVerification()
+                    // Cloudflare may attach its human-verification challenge to a 429. If the
+                    // response explicitly says it is a challenge, show it instead of hiding it
+                    // behind the generic rate-limit state.
+                    if (challenge) requireVerification()
                     else onPageError(pricingHttpStatus(response.statusCode), preserveResponse = true)
                 }
             }
@@ -318,7 +321,7 @@ internal class MarketplacePricingController(
     }
     private fun inspectPage(view: WebView) {
         if (!active || view !== webView || !allowed(view.url) ||
-            status == MarketplaceUiPriceStatus.RATE_LIMITED || inspectedGeneration == generation) return
+            inspectedGeneration == generation) return
         val current = generation
         inspectedGeneration = current
         val script = """

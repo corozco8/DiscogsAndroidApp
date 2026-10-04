@@ -8,6 +8,8 @@ import com.example.discogsandroidapp.dashboard.PlaceholderScreen
 import com.example.discogsandroidapp.dashboard.ProfileDashboard
 import com.example.discogsandroidapp.dashboard.RatingsWebScreen
 import com.example.discogsandroidapp.dashboard.SearchResultRow
+import com.example.discogsandroidapp.debug.PricingDebugScreen
+import com.example.discogsandroidapp.debug.PricingDebugReleaseInfo
 import com.example.discogsandroidapp.data.DiscogsOrder
 import com.example.discogsandroidapp.data.InventoryListing
 import com.example.discogsandroidapp.data.ListingRelease
@@ -454,9 +456,25 @@ class MainActivity : ComponentActivity() {
                             ?: (uiState as? ReleaseUiState.ReleaseSuccess)?.release?.id
                         val sharedPricing = com.example.discogsandroidapp.pricing.rememberMarketplacePricing(pricingReleaseId)
                         if (marketplaceReleaseId != null) {
+                            val currentReleaseForDebug = (uiState as? ReleaseUiState.ReleaseSuccess)?.release
+                                ?.takeIf { it.id == marketplaceReleaseId }
+                            val marketplaceDebugRelease = currentReleaseForDebug?.let { release ->
+                                PricingDebugReleaseInfo(
+                                    releaseId = release.id ?: marketplaceReleaseId!!,
+                                    artist = release.artists.orEmpty()
+                                        .mapNotNull { it.name?.takeIf { name -> name.isNotBlank() } }
+                                        .joinToString(", "),
+                                    title = release.title.orEmpty(),
+                                    year = release.year,
+                                    have = release.community?.have ?: 0,
+                                    want = release.community?.want ?: 0
+                                )
+                            }
                             MarketplaceListingsScreen(
                                 releaseId = marketplaceReleaseId!!,
                                 priceSummary = marketplacePriceSummary,
+                                algorithmPriceSummary = marketplacePriceSummary,
+                                pricingDebugRelease = marketplaceDebugRelease,
                                 pricingController = sharedPricing,
                                 suggestionsModel = searchSuggestions,
                                 onReleaseRequested = { result ->
@@ -756,6 +774,10 @@ class MainActivity : ComponentActivity() {
 
                                                         onCustomerHistoryClick = {
                                                             viewModel.navigateToCustomerHistory()
+                                                        },
+
+                                                        onDebugClick = {
+                                                            viewModel.navigateToPricingDebug()
                                                         },
 
                                                         onSellerRatingClick = {
@@ -1263,6 +1285,10 @@ class MainActivity : ComponentActivity() {
                                                     sellerInsightsViewModel.refreshNow()
                                                 }
                                             )
+                                        }
+
+                                        is ReleaseUiState.PricingDebug -> {
+                                            PricingDebugScreen()
                                         }
 
                                         is ReleaseUiState.Inventory ->

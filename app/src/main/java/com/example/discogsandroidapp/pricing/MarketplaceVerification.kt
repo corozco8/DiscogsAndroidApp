@@ -10,18 +10,24 @@ internal fun marketplaceAccessStatus(
     hasMarketplaceListings: Boolean = false
 ): MarketplaceUiPriceStatus? {
     val text = (if (hasMarketplaceListings) title else "$title\n$body").lowercase(java.util.Locale.ROOT)
-    if (httpStatus == 429 || (!hasMarketplaceListings &&
-            Regex("too many requests|rate limit(?:ed| exceeded)|error\\s*1015").containsMatchIn(text))) {
-        return MarketplaceUiPriceStatus.RATE_LIMITED
-    }
     val challengeText = Regex(
         "verify (?:that )?you(?:'re| are) human|verify you are a human|verifying you are human|" +
             "checking your browser|checking if the site connection is secure|" +
             "performing security verification|enable javascript and cookies to continue"
     ).containsMatchIn(text)
-    if (challengeHeader || hasChallengeFrame || (challengeText && text.contains("cloudflare")) ||
-        (title.trim().startsWith("Just a moment", ignoreCase = true) && text.contains("cloudflare"))) {
+    val hasExplicitChallenge = challengeHeader || hasChallengeFrame ||
+        (challengeText && text.contains("cloudflare")) ||
+        (title.trim().startsWith("Just a moment", ignoreCase = true) && text.contains("cloudflare"))
+
+    // An actionable Cloudflare challenge takes priority over its HTTP status. Cloudflare can
+    // deliver the human-verification page with a 429 response; treating that as a plain rate
+    // limit hides the checkbox and prevents the seller from completing the legitimate check.
+    if (hasExplicitChallenge) {
         return MarketplaceUiPriceStatus.VERIFICATION_REQUIRED
+    }
+    if (httpStatus == 429 || (!hasMarketplaceListings &&
+            Regex("too many requests|rate limit(?:ed| exceeded)|error\\s*1015").containsMatchIn(text))) {
+        return MarketplaceUiPriceStatus.RATE_LIMITED
     }
     return when {
         httpStatus == 401 || httpStatus == 403 || text.contains("access denied") -> MarketplaceUiPriceStatus.BLOCKED

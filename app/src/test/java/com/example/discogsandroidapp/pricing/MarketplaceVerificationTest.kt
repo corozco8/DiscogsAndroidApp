@@ -19,9 +19,11 @@ class MarketplaceVerificationTest {
             marketplaceAccessStatus("Discogs", "", hasChallengeFrame = true))
     }
 
-    @Test fun rateLimitNeverAsksForVerification() {
-        assertEquals(MarketplaceUiPriceStatus.RATE_LIMITED,
+    @Test fun actionableChallengeWinsEvenWhenCloudflareUses429() {
+        assertEquals(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED,
             marketplaceAccessStatus("Just a moment", "Cloudflare", challengeHeader = true, httpStatus = 429))
+        assertEquals(MarketplaceUiPriceStatus.VERIFICATION_REQUIRED,
+            marketplaceAccessStatus("Just a moment", "Cloudflare: Verify you are human", httpStatus = 429))
         assertEquals(MarketplaceUiPriceStatus.RATE_LIMITED,
             marketplaceAccessStatus("Access denied", "Cloudflare Error 1015: You are being rate limited"))
     }

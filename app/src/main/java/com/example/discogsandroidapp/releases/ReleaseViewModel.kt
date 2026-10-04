@@ -356,6 +356,11 @@ class ReleaseViewModel(application: android.app.Application) : androidx.lifecycl
         _uiState.value = ReleaseUiState.CustomerHistory
     }
 
+    fun navigateToPricingDebug() {
+        invalidateNavigationRequests()
+        _uiState.value = ReleaseUiState.PricingDebug
+    }
+
     fun fetchUserProfile(token: String) {
         viewModelScope.launch {
             _profileUiState.value = ProfileUiState.Loading
