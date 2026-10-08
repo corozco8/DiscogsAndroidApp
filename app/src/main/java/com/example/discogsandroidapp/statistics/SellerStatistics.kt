@@ -29,6 +29,13 @@ internal data class StatisticsTotals(
     val orders: Int,
     val revenue: Double?,
     val revenueOrders: Int,
+    val shippingCollected: Double?,
+    val shippingOrders: Int,
+    val discogsFees: Double?,
+    val feeOrders: Int,
+    val estimatedPaypalFees: Double?,
+    val netAfterDiscogsFees: Double?,
+    val netAfterPlatformFees: Double?,
     val averageValue: Double?,
     val items: Int,
     val itemOrders: Int,
@@ -89,6 +96,16 @@ internal fun statisticsRevenueScore(growth: Double?): String = when {
 private fun Double?.validAmount() = this?.takeIf { it.isFinite() && it >= 0 }
 private fun currencyMatches(a: String, b: String) = a.trim().equals(b.trim(), ignoreCase = true)
 
+/**
+ * Estimated PayPal commercial-transaction fee based on the seller's observed
+ * PayPal statement: 3.49% of the processed amount + $0.49 per payment.
+ *
+ * The cached Discogs order total may omit marketplace-collected sales tax,
+ * so this is intentionally presented as an estimate.
+ */
+internal fun statisticsEstimatedPaypalFee(amount: Double): Double =
+    amount.coerceAtLeast(0.0) * 0.0349 + 0.49
+
 internal fun calculateSellerStatistics(
     orders: List<LocalOrderEntity>, items: List<LocalOrderItemEntity>,
     inventory: List<LocalInventoryListingEntity>, year: Int, currency: String,
@@ -104,6 +121,25 @@ internal fun calculateSellerStatistics(
     fun totals(rows: List<LocalOrderEntity>): StatisticsTotals {
         val paid = rows.filter { statisticsPaid(it.status) }
         val amounts = paid.mapNotNull { it.totalValue.validAmount() }
+        val shippingAmounts = paid.mapNotNull { it.shippingValue.validAmount() }
+        val feeAmounts = paid.mapNotNull { it.feeValue.validAmount() }
+        val revenue = if (paid.isEmpty()) 0.0 else amounts.takeIf { it.isNotEmpty() }?.sum()
+        val shippingCollected = if (paid.isEmpty()) 0.0 else shippingAmounts.takeIf { it.isNotEmpty() }?.sum()
+        val discogsFees = if (paid.isEmpty()) 0.0 else feeAmounts.takeIf { it.isNotEmpty() }?.sum()
+        val paypalFeeAmounts = amounts.map(::statisticsEstimatedPaypalFee)
+        val estimatedPaypalFees = if (paid.isEmpty()) 0.0 else
+            paypalFeeAmounts.takeIf { it.isNotEmpty() }?.sum()
+        val netAfterDiscogsFees = when {
+            paid.isEmpty() -> 0.0
+            amounts.size == paid.size && feeAmounts.size == paid.size -> amounts.sum() - feeAmounts.sum()
+            else -> null
+        }
+        val netAfterPlatformFees = when {
+            paid.isEmpty() -> 0.0
+            amounts.size == paid.size && feeAmounts.size == paid.size ->
+                amounts.sum() - feeAmounts.sum() - paypalFeeAmounts.sum()
+            else -> null
+        }
         val withItems = paid.mapNotNull { itemsByOrder[it.orderId]?.takeIf { rows -> rows.isNotEmpty() } }
         val buyers = paid.mapNotNull { order ->
             order.buyerId?.let { "id:$it" } ?: order.buyerUsername.trim()
@@ -111,12 +147,28 @@ internal fun calculateSellerStatistics(
                 ?.let { "name:${it.lowercase(Locale.US)}" }
         }
         val buyerCounts = buyers.groupingBy { it }.eachCount()
-        return StatisticsTotals(paid.size, if (paid.isEmpty()) 0.0 else amounts.takeIf { it.isNotEmpty() }?.sum(), amounts.size,
-            amounts.takeIf { it.isNotEmpty() }?.average(), withItems.sumOf { it.size }, withItems.size,
-            withItems.takeIf { it.isNotEmpty() }?.map { it.size }?.average(),
-            buyerCounts.size, buyerCounts.count { it.value > 1 }, buyers.size, rows.size,
-            rows.count { it.status.trim().startsWith("Cancelled", true) },
-            rows.count { it.status.trim().equals("Refund Sent", true) })
+        return StatisticsTotals(
+            orders = paid.size,
+            revenue = revenue,
+            revenueOrders = amounts.size,
+            shippingCollected = shippingCollected,
+            shippingOrders = shippingAmounts.size,
+            discogsFees = discogsFees,
+            feeOrders = feeAmounts.size,
+            estimatedPaypalFees = estimatedPaypalFees,
+            netAfterDiscogsFees = netAfterDiscogsFees,
+            netAfterPlatformFees = netAfterPlatformFees,
+            averageValue = amounts.takeIf { it.isNotEmpty() }?.average(),
+            items = withItems.sumOf { it.size },
+            itemOrders = withItems.size,
+            averageSize = withItems.takeIf { it.isNotEmpty() }?.map { it.size }?.average(),
+            buyers = buyerCounts.size,
+            repeatBuyers = buyerCounts.count { it.value > 1 },
+            identifiedOrders = buyers.size,
+            allOrders = rows.size,
+            cancellations = rows.count { it.status.trim().startsWith("Cancelled", true) },
+            refunds = rows.count { it.status.trim().equals("Refund Sent", true) }
+        )
     }
     fun month(time: Long) = Calendar.getInstance(zone).apply { timeInMillis = time }.get(Calendar.MONTH)
     val currentByMonth = currentOrders.groupBy { month(it.createdAtEpochMs) }

@@ -98,22 +98,47 @@ private const val FALLBACK_GRADE_STEP_RATIO = 0.78
 // Calibrated from the pricing debug dataset against real condition-matched asks.
 // The normal marketplace/stats endpoint gives us the overall current floor without
 // opening MarketplaceListingsScreen. Each grade above G+ receives a modest 15%
-// step-up. This replaces Discogs' historical 9x/13x/17x grade ladder whenever a
-// current marketplace floor is available.
+// step-up and remains the default fallback signal. Historical condition guidance
+// is used only for narrow, capped VG/G+ and VG+ underpricing exceptions below.
 private const val MARKET_FLOOR_GRADE_STEP_MULTIPLIER = 1.15
+// A current overall floor is useful, but it can be a damaged/low-grade copy.
+// When a well-stocked release has a VG+ historical guide that is dramatically
+// higher than the floor-derived VG+ estimate, blend partway toward that guide
+// instead of blindly treating the overall floor as a G+ anchor.
+private const val MARKET_GUIDE_RESCUE_MIN_RATIO = 4.0
+private const val MARKET_GUIDE_RESCUE_MEDIUM_COPIES = 25
+private const val MARKET_GUIDE_RESCUE_DEEP_COPIES = 40
+// Price guides are especially stale for widely available reissues. The recent
+// comparison set shows that guide rescue can badly overprice 120+ copy markets.
+private const val MARKET_GUIDE_RESCUE_MAX_COPIES = 119
+private const val MARKET_GUIDE_RESCUE_MEDIUM_POWER = 0.25
+private const val MARKET_GUIDE_RESCUE_DEEP_POWER = 0.50
+// When the historical *lowest* price itself is above today's marketplace floor,
+// VG/G+ copies can be materially underpriced by assuming that floor is already G+.
+// A capped, one-sided correction avoids allowing stale historical grade guides to
+// dominate releases whose floor-derived estimate already works.
+private const val LOW_GUIDE_RESCUE_MIN_RATIO = 1.25
+private const val LOW_GUIDE_RESCUE_MAX_RATIO = 2.0
+private const val LOW_GUIDE_RESCUE_POWER = 0.80
+private const val LOW_GUIDE_RESCUE_MIN_LISTINGS = 15
+private const val LOW_GUIDE_RESCUE_HISTORICAL_RATIO = 3.0
 private const val FALLBACK_EXACT_HIGH_TRUST_RATIO = 1.35
 private const val FALLBACK_EXACT_HIGH_REJECT_RATIO = 2.00
 private const val FALLBACK_EXACT_LOW_TRUST_RATIO = 0.60
 private const val FALLBACK_EXACT_LOW_REJECT_RATIO = 0.45
 
-/** Lowest qualifying ask in the retrieved sample, not the whole marketplace. */
-internal fun lowestComparableAskingPrice(
+/**
+ * Prefer the second-cheapest qualifying *listing* on the already-scanned pages.
+ * Two sellers at the same price still count as two listings, not one price tier.
+ * With just one listing use that price. No extra marketplace navigation is needed.
+ */
+internal fun preferredComparableAskingPrice(
     prices: List<Double>,
-    minimumListingCount: Int = MIN_TRUSTED_LIVE_LISTINGS
+    minimumListingCount: Int = 1
 ): Double? {
-    val valid = prices.filter { it.isFinite() && it > 0.0 }
+    val valid = prices.filter { it.isFinite() && it > 0.0 }.sorted()
     if (valid.size < minimumListingCount) return null
-    return valid.minOrNull()
+    return valid[if (valid.size >= 2) 1 else 0]
 }
 
 data class ReleasePriceSummary(
@@ -153,7 +178,8 @@ data class ReleasePriceSummary(
     val isAlbumRelease: Boolean = true
 ) {
     /**
-     * Lowest qualifying asking price for the selected media grade in our first-page sample.
+     * Second-cheapest qualifying asking price (or the only listing when there is one)
+     * for the selected media grade in the already-cached marketplace sample.
      *
      * Normal recommendation rules:
      * - M / NM: ignore marketplace copies with G+ or worse sleeves.
@@ -169,7 +195,9 @@ data class ReleasePriceSummary(
         condition: String,
         sleeveCondition: String? = null
     ): Double? {
-        val price = comparableListingPriceFor(condition, condition, sleeveCondition) ?: return null
+        val price = comparableListingPriceFor(
+            condition, condition, sleeveCondition, minimumListingCount = 1
+        ) ?: return null
         return price.takeUnless { conflictsWithHigherGrade(condition, sleeveCondition, it) }
     }
 
@@ -204,18 +232,22 @@ data class ReleasePriceSummary(
 
         fun rawMediaPrice(): Double? {
             activeMediaPriceSamples[condition]?.let { samples ->
-                return lowestComparableAskingPrice(samples, minimumListingCount)?.let(::roundPrice)
+                return preferredComparableAskingPrice(samples, minimumListingCount)?.let(::roundPrice)
             }
             val comparableCount = activeMediaListingCounts[condition] ?: 0
             if (comparableCount < minimumListingCount) return null
 
+            // Older snapshots may only contain the lowest price, not samples.
+            // Reuse that cached price without another page load; the next fresh
+            // scan will supply enough rows for a second-cheapest selection.
             return activeMediaLowestPrices[condition]
                 ?.takeIf { it.isFinite() && it > 0.0 }
                 ?.let(::roundPrice)
         }
 
         // Non-albums do not exclude low-grade or generic sleeves; compare media grade.
-        // The caller controls the comparable count; observed prices still require two.
+        // Exact live matches can use a lone listing; other comparisons can still
+        // require at least two listings when the caller requests that safeguard.
         if (!isAlbumRelease || minimumSleeveRank == null) {
             return rawMediaPrice()
         }
@@ -223,8 +255,8 @@ data class ReleasePriceSummary(
         /*
          * If the seller deliberately chooses a sleeve below the normal
          * threshold (or No Cover / Not Graded / Generic), disable the special
-         * sleeve filter for this one task. We still require two USD comparables
-         * before calling the live number trustworthy.
+         * sleeve filter for this one task. Select the second-cheapest qualifying
+         * USD listing when available, otherwise reuse the only listing.
          */
         if (!sleeveCondition.isNullOrBlank()) {
             val selectedSleeveRank = sleeveGradeRank(sleeveCondition)
@@ -240,7 +272,7 @@ data class ReleasePriceSummary(
         val qualifyingSamples = activeMediaSleevePriceSamples.filterKeys { key ->
             key.startsWith(prefix) && (sleeveGradeRank(key.removePrefix(prefix)) ?: -1) >= minimumSleeveRank
         }.values.flatten()
-        if (qualifyingSamples.isNotEmpty()) return lowestComparableAskingPrice(qualifyingSamples, minimumListingCount)?.let(::roundPrice)
+        if (qualifyingSamples.isNotEmpty()) return preferredComparableAskingPrice(qualifyingSamples, minimumListingCount)?.let(::roundPrice)
         var qualifyingCount = 0
         var lowestQualifyingPrice: Double? = null
 
@@ -260,6 +292,7 @@ data class ReleasePriceSummary(
 
         if (qualifyingCount < minimumListingCount) return null
 
+        // Legacy snapshot without individual listings: only its minimum is known.
         return lowestQualifyingPrice?.let(::roundPrice)
     }
 
@@ -436,33 +469,118 @@ data class ReleasePriceSummary(
         // All listing inputs are USD. Never silently interpret another currency as dollars.
         if (!currency.equals("USD", ignoreCase = true)) return null
 
-        /*
-         * Prefer the current marketplace floor from Discogs' normal stats API.
-         *
-         * The debug calibration set showed that Discogs' historical condition
-         * suggestions are essentially one rigid ladder off the same base value
-         * (roughly P=1x, F=2x, G=3x, G+=5x, VG=9x, VG+=13x, NM=17x, M=19x).
-         * Treating those values as independent evidence therefore caused the old
-         * fallback to overprice every captured comparison.
-         *
-         * The condition-matched live data instead supported a much gentler curve.
-         * Leave-one-release-out calibration settled around a 1.15x increase per
-         * grade above G+. This path uses no marketplace WebView and no live scrape.
-         */
+        // Keep the historical condition-specific estimate available as a second signal.
+        // It is intentionally NOT trusted by itself when a current marketplace floor exists,
+        // because the debug data shows that Discogs' historical ladder is often stale-high.
+        val historicalEstimate = historicalApiRecommendationFor(targetRank)
+
         val marketFloor = lowestAskingPrice
             ?.takeIf { it.isFinite() && it > 0.0 }
+
         if (marketFloor != null) {
             val stepsAboveGoodPlus = (targetRank - 3).coerceAtLeast(0)
             val gradeMultiplier = Math.pow(
                 MARKET_FLOOR_GRADE_STEP_MULTIPLIER,
                 stepsAboveGoodPlus.toDouble()
             )
-            return roundPrice(marketFloor * gradeMultiplier)
+            val floorEstimate = marketFloor * gradeMultiplier
+
+            /*
+             * Most of the comparison data favors the current floor-derived estimate.
+             * The important failure mode is VG+: occasionally the cheapest marketplace
+             * copy is a much lower-grade outlier, so applying a fixed grade ladder leaves
+             * the recommendation several times too low.
+             *
+             * Use the historical VG+ guide only as a rescue signal when:
+             *   1) it disagrees by at least 4x, and
+             *   2) there are enough copies for sale that one overall-floor listing is
+             *      less representative of the selected grade.
+             *
+             * Blending in log space keeps the result between the two signals. A medium
+             * market closes 25% of the gap; a deep market closes 50%. Sparse markets keep
+             * the current-floor estimate, which avoids resurrecting the old stale-guide
+             * overpricing problem.
+             */
+            val adjusted = adaptiveMarketFloorEstimate(
+                condition = condition,
+                floorEstimate = floorEstimate,
+                historicalEstimate = historicalEstimate
+            )
+
+            return roundPrice(adjusted)
                 .takeIf { it.isFinite() && it > 0.0 }
         }
 
-        // If current marketplace stats are unavailable, retain the historical
+        // If current marketplace stats are unavailable, retain the robust historical
         // suggestion model as a last-resort fallback rather than returning no price.
+        return historicalEstimate
+            ?.let(::roundPrice)
+            ?.takeIf { it.isFinite() && it > 0.0 }
+    }
+
+    private fun adaptiveMarketFloorEstimate(
+        condition: String,
+        floorEstimate: Double,
+        historicalEstimate: Double?
+    ): Double {
+        // VG/G+ exception: the overall cheapest asking price is below even the
+        // historical price-guide low. That is a warning that the cheapest copy
+        // may be a low-grade outlier. Restrict the adjustment to well-stocked
+        // releases and require a separate grade-guide signal agreeing it is low.
+        // The cap limits the damage when historical prices are stale or distorted.
+        if (condition == "Very Good (VG)" || condition == "Good Plus (G+)") {
+            val currentFloor = lowestAskingPrice
+                ?.takeIf { it.isFinite() && it > 0.0 } ?: return floorEstimate
+            val guideLow = low?.takeIf { it.isFinite() && it > 0.0 }
+                ?: return floorEstimate
+            val historical = historicalEstimate
+                ?.takeIf { it.isFinite() && it > 0.0 } ?: return floorEstimate
+            val lowRatio = guideLow / currentFloor
+            if (numForSale >= LOW_GUIDE_RESCUE_MIN_LISTINGS &&
+                lowRatio >= LOW_GUIDE_RESCUE_MIN_RATIO &&
+                historical / currentFloor >= LOW_GUIDE_RESCUE_HISTORICAL_RATIO
+            ) {
+                return floorEstimate * Math.pow(
+                    lowRatio.coerceAtMost(LOW_GUIDE_RESCUE_MAX_RATIO),
+                    LOW_GUIDE_RESCUE_POWER
+                )
+            }
+            return floorEstimate
+        }
+
+        // The export shows that the guide-based rescue can overshoot on releases
+        // with hundreds of offers, where the overall floor is generally useful.
+        // Preserve the original floor calculation for those deep markets.
+        // NM and Mint remain on the current floor grade-step curve.
+        if (condition != "Very Good Plus (VG+)") return floorEstimate
+        if (numForSale > MARKET_GUIDE_RESCUE_MAX_COPIES) return floorEstimate
+
+        val guide = historicalEstimate
+            ?.takeIf { it.isFinite() && it > floorEstimate }
+            ?: return floorEstimate
+
+        val guideToFloor = guide / floorEstimate
+        if (guideToFloor < MARKET_GUIDE_RESCUE_MIN_RATIO) return floorEstimate
+
+        val blendPower = when {
+            numForSale >= MARKET_GUIDE_RESCUE_DEEP_COPIES ->
+                MARKET_GUIDE_RESCUE_DEEP_POWER
+
+            numForSale >= MARKET_GUIDE_RESCUE_MEDIUM_COPIES ->
+                MARKET_GUIDE_RESCUE_MEDIUM_POWER
+
+            else -> return floorEstimate
+        }
+
+        return floorEstimate * Math.pow(guideToFloor, blendPower)
+    }
+
+    /**
+     * Historical API-only condition estimate. This preserves the existing robust
+     * interpolation/peer-consensus behavior, but it no longer automatically overrides
+     * a current market floor.
+     */
+    private fun historicalApiRecommendationFor(targetRank: Int): Double? {
         val points = priceSuggestions?.conditionPricePoints().orEmpty()
         if (points.isEmpty()) {
             // The historical price-guide median is still a last-resort anchor when

@@ -1,0 +1,75 @@
+package com.example.discogsandroidapp.dashboard
+
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.viewinterop.AndroidView
+
+@Composable
+fun RatingsWebScreen(
+    username: String,
+    ratingType: String,
+    onBackClick: () -> Unit // We keep this parameter so MainActivity doesn't complain, even if the global header handles the click!
+) {
+    // Discogs separates seller and buyer feedback into two different URLs
+    val url = if (ratingType == "seller") {
+        "https://www.discogs.com/sell/seller_feedback/$username"
+    } else {
+        "https://www.discogs.com/sell/buyer_feedback/$username"
+    }
+
+    var webView by remember { mutableStateOf<WebView?>(null) }
+    val requestedUrl = remember { arrayOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webView?.apply {
+                stopLoading()
+                webViewClient = WebViewClient()
+                destroy()
+            }
+            webView = null
+        }
+    }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { context ->
+            WebView(context).apply {
+                webView = this
+                settings.javaScriptEnabled = true
+
+                settings.domStorageEnabled = true
+
+                // Use Android WebView's standard browser identity. Keep cookies enabled so
+                // normal Discogs login/session state and any user-completed verification persist.
+                android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+                android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                webViewClient = WebViewClient()
+                requestedUrl[0] = url
+                loadUrl(url)
+            }
+        },
+        update = { view ->
+            // Compose may run this block many times. Keep it side-effect free.
+            webView = view
+        }
+    )
+
+    LaunchedEffect(url, webView) {
+        val view = webView ?: return@LaunchedEffect
+        if (requestedUrl[0] != url) {
+            requestedUrl[0] = url
+            view.loadUrl(url)
+        }
+    }
+}

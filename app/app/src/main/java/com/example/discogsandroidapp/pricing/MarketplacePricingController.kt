@@ -6,12 +6,6 @@ import android.net.Uri
 import android.webkit.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
-import org.json.JSONArray
-import org.json.JSONObject
-
-private object PricingSessions {
-    val verificationGate = MarketplaceVerificationGate()
-}
 
 /** Shared by release details and the visible marketplace; owned by the current screen. */
 internal class MarketplacePricingController(
@@ -30,12 +24,9 @@ internal class MarketplacePricingController(
     private var pageHidden = true
     @Volatile private var pagePaused = false
     private var forcePageReload = false
-    var verificationVisible by mutableStateOf(false); private set
     private var generation = 0
     private var active = true
     private var webView: WebView? = null
-    private var lastHttpStatus: Int? = null
-    private var inspectedGeneration: Int? = null
     private var scannedGeneration = -1
     val canShowPage: Boolean get() = webView != null || loadAllowed
     val listingInfo: ListingPricingInfo get() = ListingPricingInfo(
@@ -55,8 +46,8 @@ internal class MarketplacePricingController(
             MarketplaceUiPriceStatus.NO_MATCH -> "No matching listings found. Using estimated pricing."
             MarketplaceUiPriceStatus.PARTIAL -> cached + "Only part of the page could be read."
             MarketplaceUiPriceStatus.BLOCKED -> cached + "Discogs blocked the page. Open Marketplace Listings to check access."
-            MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> cached + "Discogs requires a Cloudflare security check before live prices can be read."
-            MarketplaceUiPriceStatus.RATE_LIMITED -> cached + "Discogs returned Too many requests. Open Marketplace Listings to view the response, or tap Refresh prices to try again."
+            MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> cached + "Discogs is showing a verification page. Open Marketplace Listings to complete it in the normal browser view."
+            MarketplaceUiPriceStatus.RATE_LIMITED -> cached + "Discogs returned Too many requests. Live requests are temporarily paused; saved or estimated pricing remains available."
             MarketplaceUiPriceStatus.NETWORK -> cached + "Connection failed. Check your connection and retry."
             MarketplaceUiPriceStatus.TIMEOUT -> cached + "The marketplace page took too long to load."
             MarketplaceUiPriceStatus.UNREADABLE -> cached + "Could not read listing prices from this page."
@@ -156,43 +147,25 @@ internal class MarketplacePricingController(
         // initial navigation is allowed when no reusable page exists.
         queueLoad(manual = true)
     }
-    /** Record a page error without scheduling retries or blocking the seller's next request. */
-    fun onPageError(failure: MarketplaceUiPriceStatus, preserveResponse: Boolean = false) {
+    /** Record a page error without scheduling retries. Rate-limit responses start a shared cooldown. */
+    fun onPageError(
+        failure: MarketplaceUiPriceStatus,
+        preserveResponse: Boolean = false,
+        retryAfterMillis: Long? = null
+    ) {
         if (!active) return
         generation++ // Invalidate delayed scans; onPageFinished cannot overwrite a failed navigation.
         scannedGeneration = generation
         status = failure
         if (failure in setOf(MarketplaceUiPriceStatus.RATE_LIMITED, MarketplaceUiPriceStatus.BLOCKED)) {
-            loadPolicy.recordBlock()
+            loadPolicy.recordBlock(retryAfterMillis ?: MarketplaceLoadPolicy.DEFAULT_BLOCK_COOLDOWN_MS)
         }
         if (errorDetails == null) {
             MarketplaceTrafficReport.log.error(releaseId ?: 0, "Marketplace status: $failure")
         }
         needsLoad = false
         if (!preserveResponse) webView?.stopLoading()
-        // Do not forcibly close an already-visible Cloudflare page on a 429. The response
-        // may still contain an actionable human-verification challenge that the DOM check
-        // can recognize once the page finishes rendering.
-    }
-    private fun requireVerification() {
-        if (status != MarketplaceUiPriceStatus.VERIFICATION_REQUIRED) {
-            generation++
-            scannedGeneration = -1
-        }
-        status = MarketplaceUiPriceStatus.VERIFICATION_REQUIRED
-    }
-    fun openVerification(automatic: Boolean = false) {
-        if (!active || verificationVisible || !PricingSessions.verificationGate.shouldOpen(status, automatic)) return
-        needsLoad = true
-        if (!automatic) manualAttempt = true
-        verificationVisible = true
-    }
-    fun closeVerification() { verificationVisible = false }
-
-    /** Polling reads the existing DOM only. It never reloads a page or clicks a challenge. */
-    fun checkVerificationPage() {
-        val view = webView ?: return
-        if (verificationVisible) inspectPage(view)
+        // The loaded WebView stays visible for the user to read the actual error page.
     }
     private fun allowed(url: String?): Boolean {
         if (releaseId == null || !marketplaceUrlBelongsToRelease(url, releaseId)) return false
@@ -212,12 +185,12 @@ internal class MarketplacePricingController(
         val cached = parked?.takeIf { !forcePageReload && it.snapshot.isFresh() && allowed(it.view.url) }
         forcePageReload = false
         if (parked != null && cached == null) parked.view.destroy()
-        return (cached?.view ?: WebView(context.applicationContext)).apply {
+        return (cached?.view ?: WebView(context)).apply {
         MarketplaceExchangeRates.prepare(context)
         webView = this
         settings.javaScriptEnabled = cached == null || !hidden
         settings.domStorageEnabled = true
-        // Keep the standard User-Agent and the same WebView/session for human verification.
+        // Native WebView and cookies: Discogs owns any verification rendered in the page.
         CookieManager.getInstance().setAcceptCookie(true)
         webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -228,43 +201,47 @@ internal class MarketplacePricingController(
             }
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 generation++
-                lastHttpStatus = null
                 scannedGeneration = -1
                 if (!allowed(url)) return
                 errorDetails = null
                 status = MarketplaceUiPriceStatus.LOADING
-                val current = generation
-                view.postDelayed({
-                    if (active && generation == current && status == MarketplaceUiPriceStatus.LOADING) {
-                        onPageError(MarketplaceUiPriceStatus.TIMEOUT)
-                    }
-                }, 30_000L)
+                // Let the browser finish naturally rather than stopping it before a challenge renders.
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 if (active && view === webView && request.isForMainFrame && allowed(request.url.toString())) {
-                    lastHttpStatus = response.statusCode
                     errorDetails = marketplaceErrorDetails(request.url.toString(), response.statusCode,
                         response.responseHeaders.orEmpty())
                     MarketplaceTrafficReport.log.error(releaseId, errorDetails!!)
                     android.util.Log.w("MarketplaceResponse", errorDetails!!)
-                    val challenge = response.responseHeaders?.entries?.any {
-                        it.key.equals("cf-mitigated", true) && it.value.equals("challenge", true)
-                    } == true
-                    // Cloudflare may attach its human-verification challenge to a 429. If the
-                    // response explicitly says it is a challenge, show it instead of hiding it
-                    // behind the generic rate-limit state.
-                    if (challenge) requireVerification()
-                    else onPageError(pricingHttpStatus(response.statusCode), preserveResponse = true)
+                    // Report the HTTP status, but don't replace, reload, or intercept the
+                    // rendered page. A real verification challenge remains interactive.
+                    val retryAfterMillis = response.responseHeaders
+                        ?.entries
+                        ?.firstOrNull { it.key.equals("retry-after", ignoreCase = true) }
+                        ?.value
+                        ?.trim()
+                        ?.toLongOrNull()
+                        ?.coerceAtLeast(0L)
+                        ?.times(1_000L)
+                    onPageError(
+                        pricingHttpStatus(response.statusCode),
+                        preserveResponse = true,
+                        retryAfterMillis = retryAfterMillis
+                    )
                 }
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (active && view === webView && request.isForMainFrame && allowed(request.url.toString()) &&
                     status == MarketplaceUiPriceStatus.LOADING)
-                    onPageError(MarketplaceUiPriceStatus.NETWORK)
+                    onPageError(MarketplaceUiPriceStatus.NETWORK, preserveResponse = true)
             }
             override fun onPageFinished(view: WebView, url: String) {
-                // Error pages can contain an actionable challenge. Inspect them too.
-                inspectPage(view)
+                // Only the pricing extractor reads the DOM. A verification page is
+                // displayed as-is; no custom dialog, polling, or challenge clicks.
+                if (active && view === webView && allowed(url) &&
+                    status == MarketplaceUiPriceStatus.LOADING && scannedGeneration != generation) {
+                    scanPrices(view)
+                }
             }
         }
         if (cached == null) {
@@ -319,42 +296,6 @@ internal class MarketplacePricingController(
         pageHidden = true
         pauseHiddenPage(view)
     }
-    private fun inspectPage(view: WebView) {
-        if (!active || view !== webView || !allowed(view.url) ||
-            inspectedGeneration == generation) return
-        val current = generation
-        inspectedGeneration = current
-        val script = """
-            (function() {
-                return JSON.stringify({
-                    title: document.title || '',
-                    body: (document.body && document.body.innerText || '').slice(0, 6000),
-                    listings: !!document.querySelector('a[href*="/sell/item/"], .item_condition, [data-testid="media-condition"]'),
-                    challenge: Array.from(document.querySelectorAll('iframe')).some(function(frame) {
-                        return (frame.getAttribute('src') || '').indexOf('https://challenges.cloudflare.com/') === 0 &&
-                            frame.getClientRects().length > 0 && frame.getBoundingClientRect().height > 0;
-                    })
-                });
-            })();
-        """.trimIndent()
-        view.evaluateJavascript(script) { raw ->
-            if (inspectedGeneration == current) inspectedGeneration = null
-            if (!active || view !== webView || current != generation || !allowed(view.url)) return@evaluateJavascript
-            val document = runCatching { JSONObject(JSONArray("[$raw]").getString(0)) }.getOrNull()
-                ?: return@evaluateJavascript
-            // A solved challenge can replace its DOM without a new navigation.
-            val previousChallenge = status == MarketplaceUiPriceStatus.VERIFICATION_REQUIRED || verificationVisible
-            when (val access = marketplaceAccessStatus(
-                document.optString("title"), document.optString("body"), document.optBoolean("challenge"),
-                httpStatus = if (previousChallenge) null else lastHttpStatus,
-                hasMarketplaceListings = document.optBoolean("listings")
-            )) {
-                MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> requireVerification()
-                null -> if (scannedGeneration != generation) scanPrices(view)
-                else -> if (status != access) onPageError(access)
-            }
-        }
-    }
     private fun scanPrices(view: WebView) {
         val current = generation
         scannedGeneration = current
@@ -365,18 +306,20 @@ internal class MarketplacePricingController(
                 if (active && current == generation) {
                     when (result) {
                         MarketplaceUiPriceStatus.FRESH, MarketplaceUiPriceStatus.NO_MATCH -> {
-                            if (manualAttempt || verificationVisible) loadPolicy.recordManualSuccess()
+                            if (manualAttempt) loadPolicy.recordManualSuccess()
                             status = result
                             needsLoad = false
                             snapshot = getCachedMarketplacePriceSnapshot(releaseId)
                             CookieManager.getInstance().flush()
-                            PricingSessions.verificationGate.verified()
-                            verificationVisible = false
                             pauseHiddenPage(view)
                         }
-                        MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> requireVerification()
+                        MarketplaceUiPriceStatus.VERIFICATION_REQUIRED -> {
+                            // Inform the UI but let the existing WebView render the real page.
+                            status = result
+                            needsLoad = false
+                        }
                         MarketplaceUiPriceStatus.LOADING -> status = result
-                        else -> onPageError(result)
+                        else -> onPageError(result, preserveResponse = true)
                     }
                 }
             })
